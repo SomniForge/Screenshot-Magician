@@ -12,7 +12,7 @@
 </template>
 
 <style scoped>
-/* Add styles specific to this view */
+/* View Specific Styles */
 h1 {
   color: #333;
 }
