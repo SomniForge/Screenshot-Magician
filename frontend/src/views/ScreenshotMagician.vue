@@ -5,8 +5,8 @@
 
 <template>
   <div>
-    <h2 id="mainHeader">Home</h2>
-    <p>Welcome!</p>
+    <h2 id="mainHeader">Screenshot Magician</h2>
+    <p>Welcome!</p>    
     <v-btn color="primary">Click Me</v-btn>
   </div>
 </template>

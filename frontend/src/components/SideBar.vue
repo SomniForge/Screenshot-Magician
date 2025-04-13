@@ -19,9 +19,9 @@ const isRail = ref(true);
     <!-- Keep permanent so v-main always respects its space -->
 
     <v-list density="compact" nav>
-      <v-list-item prepend-icon="mdi-home" title="Home" value="home"></v-list-item>
+      <router-link style="text-decoration: none; color: inherit;" to="/"><v-list-item prepend-icon="mdi-home" title="Home" value="home"></v-list-item></router-link>
       <v-divider></v-divider>
-      <v-list-item prepend-icon="mdi-camera-iris" title="Screenshot Magician" value="ssmag"></v-list-item>
+      <router-link style="text-decoration: none; color: inherit;" to="/ssmag"><v-list-item prepend-icon="mdi-camera-iris" title="Screenshot Magician" value="ssmag"></v-list-item></router-link>
       <v-list-item prepend-icon="mdi-information-outline" title="Starred" value="starred"></v-list-item>
       <v-list-item prepend-icon="mdi-github" title="Source Code" value="github"></v-list-item>
     </v-list>
@@ -33,5 +33,9 @@ const isRail = ref(true);
 
 .v-navigation-drawer {
   transition: width 0.1s ease-in-out !important; /* Smooth the width change */
+}
+
+.v-list-item {
+  color:aliceblue;
 }
 </style>

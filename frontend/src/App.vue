@@ -3,6 +3,7 @@
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 import SideBar from '@/components/SideBar.vue';
+import Footer from '@/components/Footer.vue';
 </script>
 
 <template>
@@ -13,6 +14,7 @@ import SideBar from '@/components/SideBar.vue';
     <v-main> <!-- v-main will automatically position itself next to the drawer sidebar component -->
       <v-container fluid> <!-- Container for content padding/layout -->
         <RouterView /> <!-- Main Content goes inside v-main -->
+        <Footer />
       </v-container>
     </v-main>
 
