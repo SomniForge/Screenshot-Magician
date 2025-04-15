@@ -5,8 +5,7 @@ import Magician from '@/components/Magician.vue';
 </script>
 
 <template>
-  <div> <!-- Header Div-->
-    <h2 id="mainHeader">Screenshot Magician</h2>
+  <div class="magician-view">
     <Magician />
   </div>
 </template>
@@ -21,8 +20,9 @@ h2 {
     text-align: center;
 }
 
-.v-btn {
-  margin-bottom: 20px;
+.magician-view {
+  height: 100%;
+  width: 100%;
 }
 </style>
 

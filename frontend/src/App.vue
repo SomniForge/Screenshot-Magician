@@ -7,21 +7,34 @@ import Footer from '@/components/Footer.vue';
 </script>
 
 <template>
-  <v-app> <!-- Vuetify's main wrapper -->
+  <v-app>
+    <SideBar />
     
-    <SideBar /> <!-- Sidebar component directly inside v-app -->
-
-    <v-main> <!-- v-main will automatically position itself next to the drawer sidebar component -->
-      <v-container fluid> <!-- Container for content padding/layout -->
-        <RouterView /> <!-- Main Content goes inside v-main -->
-        <Footer />
-      </v-container>
+    <v-main>
+      <RouterView />
     </v-main>
 
+    <Footer />
   </v-app>
 </template>
 
-<style scoped>
-/* APP-WIDE styles */
+<style>
+.v-application {
+  height: 100vh;
+  max-height: 100vh;
+  overflow: hidden;
+}
 
+.v-main {
+  height: calc(100vh - 48px);
+}
+
+.v-main > .v-container {
+  height: 100%;
+  padding: 0;
+}
+
+.v-footer {
+  height: 48px !important;
+}
 </style>
