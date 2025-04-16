@@ -1,6 +1,6 @@
 # Screenshot Magician
 
-A powerful web-based tool for creating, editing, and managing screenshots with advanced chat overlay capabilities. Perfect for anyone who needs to make roleplay screenshots.
+A powerful web-based tool for creating, editing, and managing screenshots with advanced chat overlay capabilities. Perfect for content creators, community managers, and anyone who needs to work with game chat screenshots.
 
 ## 🌟 Features
 
@@ -104,9 +104,13 @@ If you find a bug, please open an issue with:
 
 ## ✨ Future Plans
 
-- All GTA World color swatches
+- Additional censoring options
 - Multiple layer support
-- Image filter overlays
+- Advanced text effects
+- Custom color schemes
+- Batch processing
+- Template system
+
 ---
 
-Made with ❤️ by SomniForge
+Made with ❤️ by SomniForge 

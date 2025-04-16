@@ -1,8 +1,10 @@
 // src/components/Magician.vue
 
 <script setup lang="ts">
-import { ref, computed, reactive } from 'vue';
+import { ref, computed, reactive, onMounted, watch } from 'vue';
 import { type CSSProperties } from 'vue';
+import Cookies from 'js-cookie';
+import html2canvas from 'html2canvas';
 
 const chatlogText = ref('');
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
@@ -39,13 +41,38 @@ const chatPanStartPos = reactive({ x: 0, y: 0 });
 interface ColorMapping {
   pattern: RegExp;
   color: string;
+  splitPattern?: RegExp;
+  markerColor?: string;
+  fullLine?: boolean;
+  checkPlayerName?: boolean;  // New flag
 }
 
 // Replace first/last name with single character name
 const characterName = ref('');
 
-// Update color mappings to handle phone calls
+// Watch character name changes and save to cookie
+watch(characterName, (newValue) => {
+  Cookies.set('characterName', newValue, { expires: 365 }); // Save for 1 year
+});
+
+// Update color mappings to handle all GTA World patterns
 const colorMappings: ColorMapping[] = [
+  // Radio messages - top priority
+  { 
+    pattern: /^\*\* \[S: .+? \| CH: .+?\]/i, 
+    color: 'rgb(214, 207, 140)',
+    fullLine: true
+  },
+  
+  // Add cellphone pattern with higher priority
+  { 
+    pattern: /\(cellphone\)/i,
+    color: 'rgb(251, 247, 36)',
+    fullLine: true,
+    checkPlayerName: true  // New flag to check if it's the player's message
+  },
+  
+  // Basic chat patterns
   { pattern: /says:|shouts:/i, color: 'rgb(241, 241, 241)' },
   { pattern: /\(Car\)/i, color: 'rgb(251, 247, 36)' },
   { pattern: /^\*/, color: 'rgb(194, 163, 218)' },
@@ -53,7 +80,48 @@ const colorMappings: ColorMapping[] = [
   { pattern: /\bYou paid\b|\bpaid you\b|\byou gave\b|\bgave you\b|\bYou received\b/i, color: 'rgb(86, 214, 75)' },
   { pattern: /g\)/i, color: 'rgb(255, 255, 0)' },
   { pattern: /\[low\]:|\[lower\]:/i, color: 'rgb(150, 149, 149)' },
-  // Phone call pattern will be handled separately in the parsing logic
+
+  // New patterns from the provided code
+  { 
+    pattern: /\[!]/, 
+    color: 'rgb(255, 255, 255)', 
+    splitPattern: /(\[!])/, 
+    markerColor: 'rgb(255, 0, 195)'
+  },
+  { pattern: /\[INFO]:/, color: 'rgb(255, 255, 255)', splitPattern: /(\[INFO]:)/, markerColor: 'rgb(27, 124, 222)' },
+  { pattern: /\[ALERT]/, color: 'rgb(255, 255, 255)', splitPattern: /(\[ALERT])/, markerColor: 'rgb(27, 124, 222)' },
+  { pattern: /\[GYM]/, color: 'rgb(255, 255, 255)', splitPattern: /(\[GYM])/, markerColor: 'rgb(22, 106, 189)' },
+  { pattern: /\[advertisement]/i, color: 'rgb(127, 239, 43)' },
+  { pattern: /\(\( \(PM/i, color: 'rgb(239, 227, 0)' },
+  { pattern: /\(\( \(/i, color: 'rgb(139, 138, 138)' },
+  { pattern: /\[megaphone]/i, color: 'rgb(241, 213, 3)' },
+  { pattern: /\[microphone]/i, color: 'rgb(246, 218, 3)' },
+  { pattern: /\[intercom]/i, color: 'rgb(26, 131, 232)' },
+  
+  // Character kill pattern
+  { pattern: /\[Character kill]/, color: 'rgb(240, 0, 0)', splitPattern: /(\[Character kill])/, markerColor: 'rgb(56, 150, 243)' },
+  
+  // Money patterns
+  { 
+    pattern: /\[\$.*g\)/, 
+    color: 'rgb(255, 255, 0)',
+    splitPattern: /(\[\$[^\]]*\])/,
+    markerColor: 'rgb(86, 214, 75)'
+  },
+  { 
+    pattern: /\(\$.*g\)/, 
+    color: 'rgb(255, 255, 0)',
+    splitPattern: /(\(\$[^\)]*\))/,
+    markerColor: 'rgb(86, 214, 75)'
+  },
+  
+  // Phone number pattern
+  { 
+    pattern: / PH: .*g\)/, 
+    color: 'rgb(255, 255, 0)',
+    splitPattern: /( PH: .*)/,
+    markerColor: 'rgb(86, 214, 75)'
+  }
 ];
 
 // Computed style for the drop zone
@@ -90,27 +158,61 @@ const parseChatlog = () => {
   const lines = chatlogText.value.split('\n').filter(line => line.trim() !== '');
   parsedChatLines.value = lines.map((line, index) => {
     let color: string | undefined = undefined;
+    let processedText = line;
     
-    // Special handling for phone calls
-    if (line.toLowerCase().includes('says (cellphone)')) {
-      if (characterName.value && line.startsWith(characterName.value)) {
+    // First check for cellphone messages
+    const cellphonePattern = colorMappings.find(mapping => 
+      mapping.checkPlayerName && mapping.pattern.test(line)
+    );
+    
+    if (cellphonePattern && characterName.value) {
+      // If it's the player's message, use white color
+      if (line.startsWith(characterName.value)) {
         color = 'rgb(255, 255, 255)';
       } else {
-        color = 'rgb(251, 247, 36)';
+        // Otherwise use yellow for incoming calls
+        color = cellphonePattern.color;
       }
     } else {
-      // Check other patterns if it's not a phone call
-      for (const mapping of colorMappings) {
-        if (mapping.pattern.test(line)) {
-          color = mapping.color;
-          break;
+      // Check for patterns that should color the entire line
+      const fullLinePattern = colorMappings.find(mapping => 
+        mapping.fullLine && !mapping.checkPlayerName && mapping.pattern.test(line)
+      );
+
+      if (fullLinePattern) {
+        color = fullLinePattern.color;
+      } else {
+        // Check for split patterns 
+        const splitPattern = colorMappings.find(mapping => 
+          mapping.splitPattern && mapping.pattern.test(line)
+        );
+
+        if (splitPattern && splitPattern.splitPattern && splitPattern.markerColor) {
+          const parts = line.split(splitPattern.splitPattern);
+          if (parts.length > 1) {
+            processedText = parts.map((part, i) => {
+              if (splitPattern.splitPattern?.test(part)) {
+                return `<span style="color: ${splitPattern.markerColor}">${part}</span>`;
+              }
+              return `<span style="color: ${splitPattern.color}">${part}</span>`;
+            }).join('');
+            color = 'white'; // Base color doesn't matter as we're using inline styles
+          }
+        } else {
+          // Check other patterns
+          for (const mapping of colorMappings) {
+            if (mapping.pattern.test(line)) {
+              color = mapping.color;
+              break;
+            }
+          }
         }
       }
     }
     
     return {
       id: index,
-      text: line,
+      text: processedText,
       color: color || 'white'
     };
   });
@@ -272,12 +374,23 @@ const handleWheel = (event: WheelEvent) => {
 // --- Toolbar Button Handlers ---
 const toggleImageDrag = () => {
   isImageDraggingEnabled.value = !isImageDraggingEnabled.value;
+  if (isImageDraggingEnabled.value && isChatDraggingEnabled.value) {
+    isChatDraggingEnabled.value = false; // Disable chat drag if enabling image drag
+  }
 };
 
 // --- Chat Dragging Handlers ---
 const handleChatMouseDown = (event: MouseEvent) => {
   if (!isChatDraggingEnabled.value || parsedChatLines.value.length === 0) return;
+  
+  // Don't allow chat dragging if image dragging is active and in progress
+  if (isImageDraggingEnabled.value && isPanning.value) {
+    event.stopPropagation();
+    return;
+  }
+  
   event.preventDefault();
+  event.stopPropagation(); // Stop event from propagating to image
   isChatPanning.value = true;
   chatPanStart.x = event.clientX;
   chatPanStart.y = event.clientY;
@@ -288,14 +401,21 @@ const handleChatMouseDown = (event: MouseEvent) => {
 
 const handleChatMouseMove = (event: MouseEvent) => {
   if (!isChatPanning.value) return;
+  
+  // Prevent event from being handled by image drag
+  event.stopPropagation();
+  
   const deltaX = event.clientX - chatPanStart.x;
   const deltaY = event.clientY - chatPanStart.y;
   chatTransform.x = chatPanStartPos.x + deltaX;
   chatTransform.y = chatPanStartPos.y + deltaY;
 };
 
-const handleChatMouseUpOrLeave = () => {
+const handleChatMouseUpOrLeave = (event?: MouseEvent) => {
   if (isChatPanning.value) {
+    if (event) {
+      event.stopPropagation();
+    }
     isChatPanning.value = false;
     document.body.style.userSelect = '';
   }
@@ -319,13 +439,17 @@ const handleChatWheel = (event: WheelEvent) => {
 // Toggle chat dragging
 const toggleChatDrag = () => {
   isChatDraggingEnabled.value = !isChatDraggingEnabled.value;
+  if (isChatDraggingEnabled.value && isImageDraggingEnabled.value) {
+    isImageDraggingEnabled.value = false; // Disable image drag if enabling chat drag
+  }
 };
 
 // Compute chat overlay style
 const chatOverlayStyle = computed(() => ({
   transform: `translate(${chatTransform.x}px, ${chatTransform.y}px) scale(${chatTransform.scale})`,
   cursor: isChatDraggingEnabled.value ? (isChatPanning.value ? 'grabbing' : 'grab') : 'default',
-  transition: isChatPanning.value ? 'none' : 'transform 0.1s ease-out'
+  transition: isChatPanning.value ? 'none' : 'transform 0.1s ease-out',
+  pointerEvents: isChatDraggingEnabled.value ? 'auto' : 'none'
 }));
 
 // Reset all state to default values
@@ -447,7 +571,7 @@ const cycleCensorType = () => {
   console.log('Updated censor regions:', censoredRegions.value);
 };
 
-// Update applyCensoring with debug logging
+// Update applyCensoring to handle partial text censoring
 const applyCensoring = (text: string, lineIndex: number) => {
   const regions = censoredRegions.value
     .filter(region => region.lineIndex === lineIndex)
@@ -493,10 +617,6 @@ const applyCensoring = (text: string, lineIndex: number) => {
 
   // Add remaining uncensored text
   result += text.slice(lastIndex);
-  
-  // Log the final result for debugging
-  console.log('Final censored text:', result);
-  
   return result;
 };
 
@@ -546,7 +666,34 @@ const handleTextSelection = () => {
   }
 };
 
-// Function to save the final image
+// Helper function to strip HTML and extract text content
+const stripHtml = (html: string): string => {
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  return temp.textContent || temp.innerText || '';
+};
+
+// Helper function to break text into lines
+const breakTextIntoLines = (text: string, ctx: CanvasRenderingContext2D, maxWidth: number): string[] => {
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let currentLine = words[0];
+
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    const width = ctx.measureText(currentLine + ' ' + word).width;
+    if (width < maxWidth) {
+      currentLine += ' ' + word;
+    } else {
+      lines.push(currentLine);
+      currentLine = word;
+    }
+  }
+  lines.push(currentLine);
+  return lines;
+};
+
+// Update the saveImage function to match editor rendering
 const saveImage = async () => {
   if (!droppedImageSrc.value) {
     console.warn('No image to save');
@@ -554,7 +701,6 @@ const saveImage = async () => {
   }
 
   try {
-    // Create a canvas element
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     if (!ctx) {
@@ -579,118 +725,330 @@ const saveImage = async () => {
 
     // Draw the image with correct positioning
     ctx.save();
-
-    // First, determine the scale needed to fit the image in the viewport
     const viewportRatio = canvas.width / canvas.height;
     const imageRatio = img.naturalWidth / img.naturalHeight;
     
     let baseWidth, baseHeight;
     if (imageRatio > viewportRatio) {
-      // Image is wider than viewport ratio
       baseWidth = canvas.width;
       baseHeight = canvas.width / imageRatio;
     } else {
-      // Image is taller than viewport ratio
       baseHeight = canvas.height;
       baseWidth = canvas.height * imageRatio;
     }
 
-    // Apply user's scale and position
     const scaledWidth = baseWidth * imageTransform.scale;
     const scaledHeight = baseHeight * imageTransform.scale;
     
-    // Center the image and apply user's translation
     const x = (canvas.width - scaledWidth) / 2 + imageTransform.x;
     const y = (canvas.height - scaledHeight) / 2 + imageTransform.y;
 
-    // Draw the image
     ctx.drawImage(img, x, y, scaledWidth, scaledHeight);
     ctx.restore();
 
     // If there are chat lines, render them
     if (parsedChatLines.value.length > 0) {
       ctx.save();
-      // Calculate drop zone offset (centered in canvas)
+      
+      // Match editor positioning
       const dzWidth = dropZoneWidth.value || 800;
       const dzHeight = dropZoneHeight.value || 600;
       const dropZoneLeft = (canvas.width - dzWidth) / 2;
       const dropZoneTop = (canvas.height - dzHeight) / 2;
-      ctx.translate(dropZoneLeft + chatTransform.x, dropZoneTop + chatTransform.y + 8);
+      
+      // Apply chat transform with correct offset
+      ctx.translate(dropZoneLeft + chatTransform.x, dropZoneTop + chatTransform.y);
       ctx.scale(chatTransform.scale, chatTransform.scale);
+
+      // Set up text rendering
       ctx.font = '12px "Arial Black", Arial, sans-serif';
       ctx.textBaseline = 'top';
       ctx.textRendering = 'geometricPrecision';
-      parsedChatLines.value.forEach((line, index) => {
-        const barY = index * 16;
-        const textY = barY + 2;
-        const x = 4;
-        // Gather regions for this line
-        const regions = censoredRegions.value
-          .filter(region => region.lineIndex === index)
-          .sort((a, b) => a.startOffset - b.startOffset);
-        // Build up segments (uncensored/censored)
-        let lastIndex = 0;
-        let currentX = x;
-        // For bar: measure the full text width
-        let barWidth = ctx.measureText(line.text).width;
+      
+      let currentY = 0;
+      const TEXT_OFFSET_Y = 1; // Shift text down by 1px for perfect centering
+
+      // Helper function to get text color based on content
+      const getTextColor = (text: string): string => {
+        // Check for radio messages first (since they contain asterisks)
+        if (text.includes('[S:') && text.includes('CH:')) return 'rgb(214, 207, 140)';
+        
+        // Check for RP lines (lines starting with *)
+        if (text.startsWith('*')) return 'rgb(194, 163, 218)';
+        
+        // Check for car whispers
+        if (text.includes('(Car)') && text.includes('whispers:')) return 'rgb(255, 255, 0)';
+        
+        // Check for regular whispers
+        if (text.includes('whispers:')) return 'rgb(237, 168, 65)';
+        
+        // Check for cellphone messages - make white if it's the character's message
+        if (text.includes('(cellphone)')) {
+          if (text.startsWith(characterName.value)) {
+            return 'rgb(255, 255, 255)';
+          }
+          return 'rgb(251, 247, 36)';
+        }
+        
+        // Check for megaphone messages
+        if (text.includes('[Megaphone]')) return 'rgb(241, 213, 3)';
+        
+        // Check for money messages
+        if (text.includes('You paid')) return 'rgb(86, 214, 75)';
+        
+        // Default color
+        return 'rgb(255, 255, 255)';
+      };
+
+      // Helper function to draw black bar
+      const drawBlackBar = (y: number, width: number) => {
         if (showBlackBars.value) {
-          ctx.save();
           ctx.fillStyle = '#000000';
-          ctx.fillRect(x - 2, barY, barWidth + 8, 16);
-          ctx.restore();
+          // Extend the bar height by 1px and position it to overlap with adjacent bars
+          ctx.fillRect(0, y, width + 8, 17);
         }
-        // Draw each segment
-        for (let r = 0; r <= regions.length; r++) {
-          const region = regions[r];
-          const segStart = lastIndex;
-          const segEnd = region ? region.startOffset : line.text.length;
-          // Draw uncensored segment
-          if (segEnd > segStart) {
-            const segText = line.text.slice(segStart, segEnd);
-            ctx.save();
-            ctx.strokeStyle = '#000000';
-            ctx.lineWidth = 2;
-            ctx.lineJoin = 'miter';
-            ctx.miterLimit = 2;
-            ctx.strokeText(segText, currentX, textY);
-            ctx.fillStyle = line.color || 'white';
-            ctx.fillText(segText, currentX, textY);
-            ctx.restore();
-            currentX += ctx.measureText(segText).width;
+      };
+
+      // Helper function to draw text with outline
+      const drawTextWithOutline = (text: string, x: number, y: number, color: string, censorType?: CensorType) => {
+        const width = ctx.measureText(text).width;
+        
+        // If black bars are enabled, draw the background first
+        if (showBlackBars.value) {
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(x, y, width, 16);
+        }
+
+        if (censorType) {
+          // Handle censoring
+          switch (censorType) {
+            case CensorType.Invisible:
+              // Skip drawing anything
+              return;
+            case CensorType.BlackBar:
+              // Just a black rectangle
+              ctx.fillStyle = '#000000';
+              ctx.fillRect(x, y, width, 16);
+              return;
+            case CensorType.Blur:
+              // Create a temporary canvas for the blur effect
+              const tempCanvas = document.createElement('canvas');
+              tempCanvas.width = width + 20; // Add padding for blur
+              tempCanvas.height = 36; // Add vertical padding
+              const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+              if (!tempCtx) return;
+
+              // Set up text rendering on temp canvas
+              tempCtx.font = ctx.font;
+              tempCtx.textBaseline = 'top';
+              
+              // Draw the base text
+              tempCtx.strokeStyle = '#000000';
+              tempCtx.lineWidth = 2;
+              tempCtx.strokeText(text, 10, 10);
+              tempCtx.fillStyle = color;
+              tempCtx.fillText(text, 10, 10);
+
+              // Create blur effect by drawing multiple copies with slight offsets
+              tempCtx.globalAlpha = 0.1;
+              const blurRadius = 5;
+              const numPasses = 20;
+
+              // Draw copies in a circular pattern
+              for (let i = 0; i < numPasses; i++) {
+                const angle = (i / numPasses) * Math.PI * 2;
+                for (let r = 1; r <= blurRadius; r++) {
+                  const offsetX = Math.cos(angle) * r;
+                  const offsetY = Math.sin(angle) * r;
+                  tempCtx.strokeText(text, 10 + offsetX, 10 + offsetY);
+                  tempCtx.fillText(text, 10 + offsetX, 10 + offsetY);
+                }
+              }
+
+              // Draw additional copies with random offsets for more natural blur
+              tempCtx.globalAlpha = 0.05;
+              for (let i = 0; i < 30; i++) {
+                const offsetX = (Math.random() * 2 - 1) * blurRadius;
+                const offsetY = (Math.random() * 2 - 1) * blurRadius;
+                tempCtx.strokeText(text, 10 + offsetX, 10 + offsetY);
+                tempCtx.fillText(text, 10 + offsetX, 10 + offsetY);
+              }
+
+              // Draw the blurred result back to main canvas
+              ctx.drawImage(tempCanvas, x - 10, y - 10);
+              return;
           }
-          if (region) {
-            // Draw censored segment
-            const censoredText = line.text.slice(region.startOffset, region.endOffset);
-            const censorWidth = ctx.measureText(censoredText).width;
-            switch (region.type) {
-              case CensorType.Invisible:
-                // Skip drawing, just advance
-                break;
-              case CensorType.BlackBar:
-                ctx.save();
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(currentX, barY, censorWidth, 16);
-                ctx.restore();
-                break;
-              case CensorType.Blur:
-                ctx.save();
-                ctx.filter = 'blur(5px)';
-                ctx.strokeStyle = '#000000';
-                ctx.lineWidth = 2;
-                ctx.lineJoin = 'miter';
-                ctx.miterLimit = 2;
-                ctx.strokeText(censoredText, currentX, textY);
-                ctx.fillStyle = line.color || 'white';
-                ctx.fillText(censoredText, currentX, textY);
-                ctx.filter = 'none';
-                ctx.restore();
-                break;
+        }
+
+        // Normal text rendering
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.strokeText(text, x, y + TEXT_OFFSET_Y);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y + TEXT_OFFSET_Y);
+      };
+
+      // Helper function to get censor type for a position in text
+      const getCensorType = (lineIndex: number, startPos: number, length: number): CensorType | undefined => {
+        return censoredRegions.value.find(r => 
+          r.lineIndex === lineIndex &&
+          ((startPos >= r.startOffset && startPos < r.endOffset) || // Start point is within region
+           (startPos + length > r.startOffset && startPos + length <= r.endOffset) || // End point is within region
+           (startPos <= r.startOffset && startPos + length >= r.endOffset)) // Region is completely contained
+        )?.type;
+      };
+
+      // Helper function to draw special multi-colored line
+      const drawSpecialLine = (text: string, x: number, y: number, lineIndex: number) => {
+        if (text.includes('[!]')) {
+          // Split the text around [!]
+          const parts = text.split(/(\[!\])/);
+          let currentX = x;
+          let partOffset = 0;
+          
+          for (const part of parts) {
+            const width = ctx.measureText(part).width;
+            const censorType = getCensorType(lineIndex, partOffset, part.length);
+            if (part === '[!]') {
+              drawTextWithOutline(part, currentX, y, 'rgb(255, 0, 195)', censorType);
+            } else {
+              drawTextWithOutline(part, currentX, y, 'rgb(255, 255, 255)', censorType);
             }
-            currentX += censorWidth;
-            lastIndex = region.endOffset;
+            currentX += width;
+            partOffset += part.length;
+          }
+          return true;
+        }
+        
+        if (text.includes('[Character kill]')) {
+          // Split the text around [Character kill]
+          const parts = text.split(/(\[Character kill\])/);
+          let currentX = x;
+          let partOffset = 0;
+          
+          for (const part of parts) {
+            const width = ctx.measureText(part).width;
+            const censorType = getCensorType(lineIndex, partOffset, part.length);
+            if (part === '[Character kill]') {
+              drawTextWithOutline(part, currentX, y, 'rgb(56, 150, 243)', censorType);
+            } else {
+              drawTextWithOutline(part, currentX, y, 'rgb(240, 0, 0)', censorType);
+            }
+            currentX += width;
+            partOffset += part.length;
+          }
+          return true;
+        }
+        
+        return false;
+      };
+
+      // Process each line
+      let lineIndex = 0;
+      for (const line of parsedChatLines.value) {
+        // Get the raw text content
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(line.text, 'text/html');
+        const textContent = doc.body.textContent || '';
+
+        // Word wrap setup
+        const words = textContent.split(/\s+/);
+        let currentLine = '';
+        let x = 4;
+        let lineStart = currentY;
+        let lineWidth = 0;
+        let totalOffset = 0; // Track total characters processed in this line
+
+        // Helper function to draw text with censoring
+        const drawTextSegment = async (text: string, xPos: number, yPos: number, color: string) => {
+          // Split text into censored and uncensored segments
+          let currentX = xPos;
+          let remainingText = text;
+          let currentOffset = totalOffset;
+          
+          while (remainingText.length > 0) {
+            // Find the next censored region that intersects with our current position
+            const censorRegion = censoredRegions.value.find(r => 
+              r.lineIndex === lineIndex &&
+              r.startOffset <= currentOffset + remainingText.length &&
+              r.endOffset > currentOffset
+            );
+
+            if (!censorRegion) {
+              // No more censoring in this segment, draw the rest normally
+              await drawTextWithOutline(remainingText, currentX, yPos, color);
+              break;
+            }
+
+            // Draw uncensored portion before the censored region
+            const uncensoredLength = Math.max(0, censorRegion.startOffset - currentOffset);
+            if (uncensoredLength > 0) {
+              const uncensoredText = remainingText.substring(0, uncensoredLength);
+              await drawTextWithOutline(uncensoredText, currentX, yPos, color);
+              currentX += ctx.measureText(uncensoredText).width;
+              remainingText = remainingText.substring(uncensoredLength);
+              currentOffset += uncensoredLength;
+            }
+
+            // Draw censored portion
+            const censorLength = Math.min(
+              remainingText.length,
+              censorRegion.endOffset - currentOffset
+            );
+            const censoredText = remainingText.substring(0, censorLength);
+            await drawTextWithOutline(censoredText, currentX, yPos, color, censorRegion.type);
+            currentX += ctx.measureText(censoredText).width;
+            remainingText = remainingText.substring(censorLength);
+            currentOffset += censorLength;
+          }
+        };
+
+        // Process each word
+        for (const word of words) {
+          const spaceWidth = ctx.measureText(' ').width;
+          const wordWidth = ctx.measureText(word).width;
+          const testWidth = x + (currentLine ? spaceWidth : 0) + wordWidth;
+
+          if (testWidth > dzWidth - 8) {
+            // Draw black bar for current line
+            drawBlackBar(lineStart, lineWidth);
+
+            // Draw current line with special handling for [!] and Character kill
+            if (!drawSpecialLine(currentLine, 4, lineStart, lineIndex)) {
+              await drawTextSegment(currentLine, 4, lineStart, getTextColor(textContent));
+            }
+
+            currentY += 16;
+            currentLine = word;
+            x = 4 + wordWidth;
+            lineStart = currentY;
+            lineWidth = wordWidth;
+            totalOffset += currentLine.length + 1; // +1 for space
+          } else {
+            if (currentLine) {
+              currentLine += ' ' + word;
+              x = testWidth;
+            } else {
+              currentLine = word;
+              x += wordWidth;
+            }
+            lineWidth = x;
           }
         }
-      });
+
+        // Draw black bar for the last/only line
+        drawBlackBar(lineStart, lineWidth);
+
+        // Draw remaining text with special handling for [!] and Character kill
+        if (currentLine) {
+          if (!drawSpecialLine(currentLine, 4, lineStart, lineIndex)) {
+            await drawTextSegment(currentLine, 4, lineStart, getTextColor(textContent));
+          }
+          currentY += 16;
+        }
+
+        lineIndex++;
+      }
       ctx.restore();
     }
 
@@ -713,6 +1071,147 @@ const saveImage = async () => {
     console.error('Error saving image:', error);
   }
 };
+
+// Save editor state to cookie
+const saveEditorState = () => {
+  const state = {
+    characterName: characterName.value,
+    chatlogText: chatlogText.value,
+    dropZoneWidth: dropZoneWidth.value,
+    dropZoneHeight: dropZoneHeight.value,
+    imageTransform: { ...imageTransform },
+    chatTransform: { ...chatTransform },
+    isImageDraggingEnabled: isImageDraggingEnabled.value,
+    isChatDraggingEnabled: isChatDraggingEnabled.value,
+    showBlackBars: showBlackBars.value,
+    censoredRegions: censoredRegions.value,
+    selectedText: { ...selectedText }
+  };
+  Cookies.set('editorState', JSON.stringify(state), { expires: 365 });
+};
+
+// Load editor state from cookie
+const loadEditorState = () => {
+  const savedState = Cookies.get('editorState');
+  if (savedState) {
+    try {
+      const state = JSON.parse(savedState);
+      characterName.value = state.characterName || '';
+      chatlogText.value = state.chatlogText || '';
+      dropZoneWidth.value = state.dropZoneWidth || 800;
+      dropZoneHeight.value = state.dropZoneHeight || 600;
+      Object.assign(imageTransform, state.imageTransform || { x: 0, y: 0, scale: 1 });
+      Object.assign(chatTransform, state.chatTransform || { x: 0, y: 0, scale: 1 });
+      isImageDraggingEnabled.value = state.isImageDraggingEnabled || false;
+      isChatDraggingEnabled.value = state.isChatDraggingEnabled || false;
+      showBlackBars.value = state.showBlackBars || false;
+      censoredRegions.value = state.censoredRegions || [];
+      Object.assign(selectedText, state.selectedText || { lineIndex: -1, startOffset: 0, endOffset: 0, text: '' });
+      
+      // If there's chat text, parse it
+      if (chatlogText.value) {
+        parseChatlog();
+      }
+    } catch (error) {
+      console.error('Error loading editor state:', error);
+    }
+  }
+};
+
+// Load character name from cookie
+const loadCharacterName = () => {
+  const savedName = Cookies.get('characterName');
+  if (savedName) {
+    characterName.value = savedName;
+  }
+};
+
+// Watch for changes that should trigger state save
+watch([
+  chatlogText,
+  dropZoneWidth,
+  dropZoneHeight,
+  () => ({ ...imageTransform }),
+  () => ({ ...chatTransform }),
+  isImageDraggingEnabled,
+  isChatDraggingEnabled,
+  showBlackBars,
+  censoredRegions,
+  () => ({ ...selectedText })
+], () => {
+  saveEditorState();
+}, { deep: true });
+
+// Load saved state when component mounts
+onMounted(() => {
+  loadCharacterName();
+  loadEditorState();
+});
+
+// Update the computed style for chat lines
+const chatLineStyle = computed(() => (line: ParsedLine, index: number) => {
+  // Calculate if line will wrap based on content length and available width
+  const tempDiv = document.createElement('div');
+  tempDiv.style.visibility = 'hidden';
+  tempDiv.style.position = 'absolute';
+  tempDiv.style.width = `${dropZoneWidth.value! - 16}px`;
+  tempDiv.style.whiteSpace = 'pre-wrap';
+  tempDiv.style.wordBreak = 'break-word';
+  tempDiv.style.font = '12px "Arial Black", Arial, sans-serif';
+  tempDiv.style.lineHeight = '16px';
+  tempDiv.innerHTML = line.text;
+  document.body.appendChild(tempDiv);
+  
+  const height = tempDiv.offsetHeight;
+  document.body.removeChild(tempDiv);
+  
+  // Calculate total height needed (16px per wrapped line)
+  const lines = Math.ceil(height / 16);
+  const totalHeight = lines * 16;
+  
+  // Calculate position based on previous lines
+  let position = index * 16; // Start with base position
+  
+  // Only add extra space for wrapped lines in previous messages
+  for (let i = 0; i < index; i++) {
+    const prevLine = parsedChatLines.value[i];
+    const prevTempDiv = document.createElement('div');
+    prevTempDiv.style.visibility = 'hidden';
+    prevTempDiv.style.position = 'absolute';
+    prevTempDiv.style.width = `${dropZoneWidth.value! - 16}px`;
+    prevTempDiv.style.whiteSpace = 'pre-wrap';
+    prevTempDiv.style.wordBreak = 'break-word';
+    prevTempDiv.style.font = '12px "Arial Black", Arial, sans-serif';
+    prevTempDiv.style.lineHeight = '16px';
+    prevTempDiv.innerHTML = prevLine.text;
+    document.body.appendChild(prevTempDiv);
+    
+    const prevHeight = prevTempDiv.offsetHeight;
+    document.body.removeChild(prevTempDiv);
+    
+    // Only add extra space if the line wraps (height > 16px)
+    if (prevHeight > 16) {
+      position += Math.ceil(prevHeight / 16) * 16 - 16; // Subtract base height
+    }
+  }
+
+  return {
+    transform: `translateY(${position}px)`,
+    minHeight: `${totalHeight}px`,
+    maxWidth: `${dropZoneWidth.value! - 16}px`,
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-word' as const,
+    position: 'absolute',
+    width: '100%',
+    margin: 0,
+    padding: 0
+  };
+});
+
+// Add a reactive effect to update positions when content changes
+watch([parsedChatLines, dropZoneWidth], () => {
+  renderKey.value++; // Force re-render when content or width changes
+});
 
 </script>
 
@@ -739,9 +1238,9 @@ const saveImage = async () => {
             <v-btn v-bind="props" icon="mdi-message-plus-outline" @click="triggerChatFileInput"></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Import Layer Image" location="bottom">
+        <v-tooltip text="Import Layer Image (Coming Soon!)" location="bottom">
           <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-search"></v-btn>
+            <v-btn v-bind="props" icon="mdi-layers-search" disabled></v-btn>
           </template>
         </v-tooltip>
       </div>
@@ -813,9 +1312,9 @@ const saveImage = async () => {
             ></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Enable Layer Drag" location="bottom">
+        <v-tooltip text="Enable Layer Drag (Coming Soon!)" location="bottom">
           <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-triple-outline"></v-btn> <!-- Placeholder icon -->
+            <v-btn v-bind="props" icon="mdi-layers-triple-outline" disabled></v-btn>
           </template>
         </v-tooltip>
       </div>
@@ -833,14 +1332,14 @@ const saveImage = async () => {
             ></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Create Layer" location="bottom">
+        <v-tooltip text="Create Layer (Coming Soon!)" location="bottom">
           <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-plus"></v-btn>
+            <v-btn v-bind="props" icon="mdi-layers-plus" disabled></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Remove Layer" location="bottom">
+        <v-tooltip text="Remove Layer (Coming Soon!)" location="bottom">
           <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-minus"></v-btn>
+            <v-btn v-bind="props" icon="mdi-layers-minus" disabled></v-btn>
           </template>
         </v-tooltip>
         <v-tooltip text="Censor Selection" location="bottom">
@@ -960,9 +1459,7 @@ const saveImage = async () => {
               :key="`${line.id}-${renderKey}`"
               class="chat-line-container"
               :data-line-index="index"
-              :style="{
-                transform: `translateY(${index * 16}px)`,
-              }"
+              :style="chatLineStyle(line, index)"
             >
               <div
                 class="chat-line"
@@ -1151,20 +1648,26 @@ const saveImage = async () => {
 .chat-line-container {
   position: absolute;
   left: 0;
-  display: inline-block;
-  white-space: nowrap;
-  height: 16px; /* Fixed height for each line container */
+  display: block;
+  min-height: 16px;
+  width: calc(100% - 16px);
+  overflow: visible;
+  line-height: 16px;
+  padding-bottom: 0; /* Remove extra padding */
 }
 
 .chat-line {
   position: relative;
-  display: inline-block;
+  display: block;
   font-family: 'Arial Black', sans-serif;
   font-size: 12px;
-  line-height: 16px; /* Match container height */
-  padding: 0 4px;
-  white-space: pre;
+  line-height: 16px;
+  padding: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
   pointer-events: none;
+  width: 100%;
+  margin: 0; /* Ensure no extra margins */
   text-shadow: 
     -1px -1px 0 #000,
     -1px 0 0 #000,
@@ -1178,19 +1681,24 @@ const saveImage = async () => {
 
 .chat-text {
   position: relative;
-  display: inline-block;
+  display: inline;
   padding-right: 5px;
   user-select: text !important;
   cursor: text;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .with-black-bar {
   background-color: #000000;
   padding: 0 4px;
-  height: 16px; /* Match line height */
+  display: inline;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 </style>
+
 
 
 
