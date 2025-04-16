@@ -5,7 +5,7 @@
 
 <template>
   <div style="border: 2px solid green;"> <!-- Main content div, holds everything that is NOT the sidebar or footer. -->
-    <h2 id="mainHeader">Home</h2>
+    <h2 id="mainHeader">Sebz.XYZ Privacy Policy</h2>
 
     <v-container> <!-- Container for main content BELOW footer -->
       <v-row no-gutters> <!-- Horizontal -->
