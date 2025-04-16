@@ -1,6 +1,6 @@
 # Screenshot Magician
 
-A powerful web-based tool for creating, editing, and managing screenshots with advanced chat overlay capabilities. Perfect for content creators, community managers, and anyone who needs to work with game chat screenshots.
+A powerful web-based tool for creating, editing, and managing screenshots with advanced chat overlay capabilities. Perfect for anyone who needs to make roleplay screenshots.
 
 ## 🌟 Features
 
