@@ -22,8 +22,7 @@ const isRail = ref(true);
       <router-link style="text-decoration: none; color: inherit;" to="/"><v-list-item prepend-icon="mdi-home" title="Home" value="home"></v-list-item></router-link>
       <v-divider></v-divider>
       <router-link style="text-decoration: none; color: inherit;" to="/ssmag"><v-list-item prepend-icon="mdi-camera-iris" title="Screenshot Magician" value="ssmag"></v-list-item></router-link>
-      <v-list-item prepend-icon="mdi-information-outline" title="Starred" value="starred"></v-list-item>
-      <v-list-item prepend-icon="mdi-github" title="Source Code" value="github"></v-list-item>
+      <v-list-item prepend-icon="mdi-github" title="Source Code" value="github" href="https://github.com/SomniForge/sebz.xyz"></v-list-item>
     </v-list>
   </v-navigation-drawer>
 </template>

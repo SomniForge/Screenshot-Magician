@@ -104,6 +104,7 @@ If you find a bug, please open an issue with:
 
 ## ✨ Future Plans
 
+=======
 - All GTA World color swatches
 - Multiple layer support
 - Image filter overlays

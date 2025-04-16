@@ -15,8 +15,11 @@
   "type": "commonjs",
   "dependencies": {
     "@emotion/css": "^11.13.5",
+    "@types/js-cookie": "^3.0.6",
     "dotenv": "^16.5.0",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "html2canvas": "^1.4.1",
+    "js-cookie": "^3.0.5"
   },
   "devDependencies": {
     "@types/express": "^5.0.1",
