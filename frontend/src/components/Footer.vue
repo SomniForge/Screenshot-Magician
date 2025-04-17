@@ -3,9 +3,33 @@
 import { ref } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.2-beta';
+const version = 'v2.0.4-beta'; // Incremented version
 
 const changelog = [
+    {
+        version: 'v2.0.4-beta', // New version entry
+        date: 'APR-17-2025', // Current date
+        changes: [
+            {
+                type: 'improved',
+                items: [
+                    'Increased width of Height/Width input fields to accommodate larger values'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.3-beta',
+        date: 'APR-17-2025',
+        changes: [
+            {
+                type: 'improved',
+                items: [
+                    'Added Google Analytics for usage tracking and site improvement'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.2-beta',
         date: 'APR-16-2025',

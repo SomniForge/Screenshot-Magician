@@ -1273,7 +1273,7 @@ watch([parsedChatLines, dropZoneWidth], () => {
           hide-details
           variant="solo-filled"
           flat
-          style="max-width: 100px;"
+          style="max-width: 120px;"
           prepend-inner-icon="mdi-arrow-expand-horizontal"
         ></v-text-field>
         <v-text-field
@@ -1284,7 +1284,7 @@ watch([parsedChatLines, dropZoneWidth], () => {
           hide-details
           variant="solo-filled"
           flat
-          style="max-width: 100px;"
+          style="max-width: 120px;"
           prepend-inner-icon="mdi-arrow-expand-vertical"
         ></v-text-field>
       </div>
