@@ -450,7 +450,7 @@ const chatOverlayStyle = computed(() => ({
   cursor: isChatDraggingEnabled.value ? (isChatPanning.value ? 'grabbing' : 'grab') : 'default',
   transition: isChatPanning.value ? 'none' : 'transform 0.1s ease-out',
   pointerEvents: isChatDraggingEnabled.value ? 'auto' : 'none'
-}));
+} as const));
 
 // Reset all state to default values
 const resetSession = () => {
@@ -1201,11 +1201,11 @@ const chatLineStyle = computed(() => (line: ParsedLine, index: number) => {
     maxWidth: `${dropZoneWidth.value! - 16}px`,
     whiteSpace: 'pre-wrap' as const,
     wordBreak: 'break-word' as const,
-    position: 'absolute',
+    position: 'absolute' as const,
     width: '100%',
     margin: 0,
     padding: 0
-  };
+  } as const;
 });
 
 // Add a reactive effect to update positions when content changes
