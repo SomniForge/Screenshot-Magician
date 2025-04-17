@@ -6,6 +6,12 @@ import { ref } from 'vue';
 // Reactive variable to control the rail state
 // Start with the drawer collapsed (in rail mode)
 const isRail = ref(true);
+
+import { addGtag } from "vue-gtag";
+
+function handleClick() {
+   addGtag()
+}
 </script>
 
 <template>
