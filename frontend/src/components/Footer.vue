@@ -3,9 +3,44 @@
 import { ref } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.4-beta'; // Incremented version
+const version = 'v2.0.5-beta'; // Incremented version
 
 const changelog = [
+    {
+        version: 'v2.0.5-beta', // New version entry
+        date: 'APR-18-2025', // Current date
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Made it possible to change the chatlog box width by dragging',
+                    'Any resolution will now fit inside content area. If too large, it will be shrunk to fit with an indicator'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed high resolution canvas not fitting in content area',
+                    'Fixed bug created by chatlog resizing interaction with canvas',
+                    'Fixed issue where canvas did not match 1:1 with exported image at different resolutions',
+                    'Fixed issue with line-breaks on long chat lines at wide resolutions'
+                ]
+            },
+            {
+                type: 'coming',
+                items: [
+                    'Ability to change font, supporting all GTA World fonts',
+                    'Ability to change font stroke (stroke is currently hardcoded to external black 2px)'
+                ]
+            },
+            {
+                type: 'known',
+                items: [
+                    'Censors are not working properly after changes made to export process'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.4-beta', // New version entry
         date: 'APR-17-2025', // Current date
@@ -109,6 +144,7 @@ const getChangeTypeIcon = (type) => {
         case 'fixed': return { icon: 'mdi-wrench', color: 'warning', label: 'Fixes' };
         case 'removed': return { icon: 'mdi-minus-circle', color: 'error', label: 'Removed' };
         case 'coming': return { icon: 'mdi-clock-outline', color: 'grey', label: 'Coming Soon' };
+        case 'known': return { icon: 'mdi-alert-circle-outline', color: 'deep-orange', label: 'Known Issues' }; // Added known issues type
         default: return { icon: 'mdi-circle-small', color: 'primary', label: 'Changes' };
     }
 };
