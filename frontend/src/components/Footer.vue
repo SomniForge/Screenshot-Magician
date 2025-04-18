@@ -36,6 +36,7 @@ const changelog = [
             {
                 type: 'known',
                 items: [
+                    'MAJOR: Exported image not matching canvas positions',
                     'Censors are not working properly after changes made to export process'
                 ]
             }
