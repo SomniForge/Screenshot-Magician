@@ -1540,6 +1540,21 @@ onMounted(() => {
 
     </v-toolbar>
 
+    <!-- Added Alert Banner for Known Issue -->
+    <div class="alert-banner-container">
+      <v-alert
+        type="error"
+        variant="tonal"
+        prominent
+        closable
+        icon="mdi-alert"
+        class="ma-0"
+        border="start"
+      >
+        <strong>Known Issue: We are aware of inconsistencies affecting some exported images and are actively working on a fix. Thank you for your patience.</strong>
+      </v-alert>
+    </div>
+
     <!-- New Session Confirmation Dialog -->
     <v-dialog v-model="showNewSessionDialog" max-width="400">
       <v-card>
