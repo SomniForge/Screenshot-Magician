@@ -52,6 +52,9 @@ const contentAreaRef = ref<HTMLElement | null>(null); // Reference to content ar
 const dropzoneScale = ref(1); // Scale factor for the dropzone to fit screen
 const isScaledDown = ref(false); // Flag to track if the dropzone is scaled down
 
+// Add to the script setup section near the other state variables
+const chatLineWidth = ref(640);
+
 // Calculate necessary scale factor to fit dropzone in available viewport
 const calculateDropzoneScale = () => {
   if (!contentAreaRef.value || !dropZoneWidth.value || !dropZoneHeight.value) return;
@@ -968,7 +971,7 @@ const saveImage = async () => {
       let lineIndex = 0;
       // FIXED: Use the explicit width from the CSS rule (.chat-line { width: 640px; }) 
       // minus horizontal padding (4px each side) for accurate wrapping.
-      const maxTextWidth = 640 - 8; 
+      const maxTextWidth = chatLineWidth.value - 8; 
 
       for (const line of parsedChatLines.value) {
         // Get the raw text content, ensuring HTML entities are decoded for measurement
@@ -1309,7 +1312,8 @@ const saveEditorState = () => {
     showBlackBars: showBlackBars.value,
     censoredRegions: censoredRegions.value,
     selectedText: { ...selectedText },
-    stripTimestamps: stripTimestamps.value // Save the new option
+    stripTimestamps: stripTimestamps.value,
+    chatLineWidth: chatLineWidth.value
   };
   Cookies.set('editorState', JSON.stringify(state), { expires: 365 });
 };
@@ -1332,6 +1336,7 @@ const loadEditorState = () => {
       censoredRegions.value = state.censoredRegions || [];
       Object.assign(selectedText, state.selectedText || { lineIndex: -1, startOffset: 0, endOffset: 0, text: '' });
       stripTimestamps.value = state.stripTimestamps || false; // Load the new option
+      chatLineWidth.value = state.chatLineWidth || 640;
       
       // If there's chat text, parse it
       if (chatlogText.value) {
@@ -1373,7 +1378,8 @@ watch([
   showBlackBars,
   censoredRegions,
   () => ({ ...selectedText }),
-  stripTimestamps // Watch the new option
+  stripTimestamps,
+  chatLineWidth
 ], () => {
   saveEditorState();
 }, { deep: true });
@@ -1486,6 +1492,20 @@ const handleDropZoneClick = (event: Event) => {
           style="max-width: 120px;"
           prepend-inner-icon="mdi-arrow-expand-vertical"
         ></v-text-field>
+        <v-text-field
+          v-model.number="chatLineWidth"
+          label="Line Width"
+          type="number"
+          density="compact"
+          hide-details
+          variant="solo-filled"
+          flat
+          style="max-width: 120px;"
+          prepend-inner-icon="mdi-format-line-spacing"
+          min="300"
+          max="1200"
+          @change="renderKey++"
+        ></v-text-field>
       </div>
 
       <v-spacer></v-spacer>
@@ -1562,7 +1582,6 @@ const handleDropZoneClick = (event: Event) => {
           </template>
         </v-tooltip>
       </div>
-
     </v-toolbar>
 
     <!-- Added Alert Banner for Known Issue -->
@@ -1784,9 +1803,9 @@ const handleDropZoneClick = (event: Event) => {
   font-size: 12px;
   line-height: 16px;
   padding: 0;
-  white-space: pre-wrap; /* Preserve spaces and wrap text */
-  overflow-wrap: break-word; /* Break words to prevent overflow */
-  width: 640px; /* Fixed width that will force consistent 80-character wrapping */ 
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  width: v-bind('chatLineWidth + "px"');
   margin: 0;
   text-shadow: 
     -1px -1px 0 #000,
