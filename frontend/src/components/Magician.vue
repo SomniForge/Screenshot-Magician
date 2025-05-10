@@ -764,9 +764,10 @@ const saveImage = async () => {
       ctx.scale(chatTransform.scale, chatTransform.scale);
 
       // Set up text rendering to match exactly with the preview
-      ctx.font = '12px "Arial Black", Arial, sans-serif';
+      ctx.font = '700 12px Arial, sans-serif';
       ctx.textBaseline = 'top';
       ctx.textRendering = 'geometricPrecision';
+      ctx.letterSpacing = '0px';
       
       let currentY = 0;
       const TEXT_OFFSET_Y = 1; // Consistent with preview
@@ -1799,9 +1800,9 @@ const handleDropZoneClick = (event: Event) => {
 .chat-line {
   position: relative;
   display: block;
-  font-family: 'Arial Black', sans-serif;
+  font-family: Arial, sans-serif;
   font-size: 12px;
-  line-height: 16px;
+  line-height: 1.3;
   padding: 0;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -1816,6 +1817,9 @@ const handleDropZoneClick = (event: Event) => {
     1px -1px 0 #000,
     1px 0 0 #000,
     1px 1px 0 #000;
+  -webkit-font-smoothing: none !important;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .chat-text {
@@ -1823,6 +1827,8 @@ const handleDropZoneClick = (event: Event) => {
   padding-right: 5px;
   user-select: text !important;
   cursor: text;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .with-black-bar {
