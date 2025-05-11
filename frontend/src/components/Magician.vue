@@ -14,6 +14,7 @@ const dropZoneHeight = ref<number | null>(600); // Default height
 const fileInputRef = ref<HTMLInputElement | null>(null); // Ref for the file input element
 const chatFileInputRef = ref<HTMLInputElement | null>(null); // New ref for chat file input
 const showNewSessionDialog = ref(false); // Control dialog visibility
+const stripTimestamps = ref(false); // New state for stripping timestamps
 
 // --- Resizable Chat Panel State ---
 const chatPanelRef = ref<HTMLElement | null>(null);
@@ -50,6 +51,9 @@ const chatPanStartPos = reactive({ x: 0, y: 0 });
 const contentAreaRef = ref<HTMLElement | null>(null); // Reference to content area div
 const dropzoneScale = ref(1); // Scale factor for the dropzone to fit screen
 const isScaledDown = ref(false); // Flag to track if the dropzone is scaled down
+
+// Add to the script setup section near the other state variables
+const chatLineWidth = ref(640);
 
 // Calculate necessary scale factor to fit dropzone in available viewport
 const calculateDropzoneScale = () => {
@@ -268,17 +272,23 @@ const clearChatlog = () => {
 const parseChatlog = () => {
   const lines = chatlogText.value.split('\n').filter(line => line.trim() !== '');
   parsedChatLines.value = lines.map((line, index) => {
-    let color: string | undefined = undefined;
     let processedText = line;
+    
+    // Strip timestamps if the option is enabled
+    if (stripTimestamps.value) {
+      processedText = processedText.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
+    }
+    
+    let color: string | undefined = undefined;
     
     // First check for cellphone messages
     const cellphonePattern = colorMappings.find(mapping => 
-      mapping.checkPlayerName && mapping.pattern.test(line)
+      mapping.checkPlayerName && mapping.pattern.test(processedText)
     );
     
     if (cellphonePattern && characterName.value) {
       // If it's the player's message, use white color
-      if (line.startsWith(characterName.value)) {
+      if (processedText.startsWith(characterName.value)) {
         color = 'rgb(255, 255, 255)';
       } else {
         // Otherwise use yellow for incoming calls
@@ -287,7 +297,7 @@ const parseChatlog = () => {
     } else {
       // Check for patterns that should color the entire line
       const fullLinePattern = colorMappings.find(mapping => 
-        mapping.fullLine && !mapping.checkPlayerName && mapping.pattern.test(line)
+        mapping.fullLine && !mapping.checkPlayerName && mapping.pattern.test(processedText)
       );
 
       if (fullLinePattern) {
@@ -295,11 +305,11 @@ const parseChatlog = () => {
       } else {
         // Check for split patterns 
         const splitPattern = colorMappings.find(mapping => 
-          mapping.splitPattern && mapping.pattern.test(line)
+          mapping.splitPattern && mapping.pattern.test(processedText)
         );
 
         if (splitPattern && splitPattern.splitPattern && splitPattern.markerColor) {
-          const parts = line.split(splitPattern.splitPattern);
+          const parts = processedText.split(splitPattern.splitPattern);
           if (parts.length > 1) {
             processedText = parts.map((part, i) => {
               if (splitPattern.splitPattern?.test(part)) {
@@ -312,7 +322,7 @@ const parseChatlog = () => {
         } else {
           // Check other patterns
           for (const mapping of colorMappings) {
-            if (mapping.pattern.test(line)) {
+            if (mapping.pattern.test(processedText)) {
               color = mapping.color;
               break;
             }
@@ -754,9 +764,10 @@ const saveImage = async () => {
       ctx.scale(chatTransform.scale, chatTransform.scale);
 
       // Set up text rendering to match exactly with the preview
-      ctx.font = '12px "Arial Black", Arial, sans-serif';
+      ctx.font = '700 12px Arial, sans-serif';
       ctx.textBaseline = 'top';
       ctx.textRendering = 'geometricPrecision';
+      ctx.letterSpacing = '0px';
       
       let currentY = 0;
       const TEXT_OFFSET_Y = 1; // Consistent with preview
@@ -961,7 +972,7 @@ const saveImage = async () => {
       let lineIndex = 0;
       // FIXED: Use the explicit width from the CSS rule (.chat-line { width: 640px; }) 
       // minus horizontal padding (4px each side) for accurate wrapping.
-      const maxTextWidth = 640 - 8; 
+      const maxTextWidth = chatLineWidth.value - 8; 
 
       for (const line of parsedChatLines.value) {
         // Get the raw text content, ensuring HTML entities are decoded for measurement
@@ -1301,7 +1312,9 @@ const saveEditorState = () => {
     isChatDraggingEnabled: isChatDraggingEnabled.value,
     showBlackBars: showBlackBars.value,
     censoredRegions: censoredRegions.value,
-    selectedText: { ...selectedText }
+    selectedText: { ...selectedText },
+    stripTimestamps: stripTimestamps.value,
+    chatLineWidth: chatLineWidth.value
   };
   Cookies.set('editorState', JSON.stringify(state), { expires: 365 });
 };
@@ -1323,6 +1336,8 @@ const loadEditorState = () => {
       showBlackBars.value = state.showBlackBars || false;
       censoredRegions.value = state.censoredRegions || [];
       Object.assign(selectedText, state.selectedText || { lineIndex: -1, startOffset: 0, endOffset: 0, text: '' });
+      stripTimestamps.value = state.stripTimestamps || false; // Load the new option
+      chatLineWidth.value = state.chatLineWidth || 640;
       
       // If there's chat text, parse it
       if (chatlogText.value) {
@@ -1363,7 +1378,9 @@ watch([
   isChatDraggingEnabled,
   showBlackBars,
   censoredRegions,
-  () => ({ ...selectedText })
+  () => ({ ...selectedText }),
+  stripTimestamps,
+  chatLineWidth
 ], () => {
   saveEditorState();
 }, { deep: true });
@@ -1387,6 +1404,13 @@ onMounted(() => {
   }, 100);
 });
 
+// Add this new method to handle the click on drop zone
+const handleDropZoneClick = (event: Event) => {
+  if (!droppedImageSrc.value) {
+    triggerFileInput();
+  }
+};
+
 </script>
 
 <template>
@@ -1402,14 +1426,22 @@ onMounted(() => {
             ></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Import Screenshot" location="bottom">
-          <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-camera-plus-outline" @click="triggerFileInput"></v-btn>
-          </template>
-        </v-tooltip>
         <v-tooltip text="Import Chatlog" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn v-bind="props" icon="mdi-message-plus-outline" @click="triggerChatFileInput"></v-btn>
+          </template>
+        </v-tooltip>
+        <v-tooltip text="Strip Timestamps from Chatlog" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-switch
+              v-bind="props"
+              v-model="stripTimestamps"
+              color="primary"
+              density="compact"
+              hide-details
+              class="ms-2 me-1 custom-switch"
+              @change="parseChatlog" 
+            ></v-switch>
           </template>
         </v-tooltip>
         <v-tooltip text="Import Layer Image (Coming Soon!)" location="bottom">
@@ -1460,6 +1492,20 @@ onMounted(() => {
           flat
           style="max-width: 120px;"
           prepend-inner-icon="mdi-arrow-expand-vertical"
+        ></v-text-field>
+        <v-text-field
+          v-model.number="chatLineWidth"
+          label="Line Width"
+          type="number"
+          density="compact"
+          hide-details
+          variant="solo-filled"
+          flat
+          style="max-width: 120px;"
+          prepend-inner-icon="mdi-format-line-spacing"
+          min="300"
+          max="1200"
+          @change="renderKey++"
         ></v-text-field>
       </div>
 
@@ -1537,7 +1583,6 @@ onMounted(() => {
           </template>
         </v-tooltip>
       </div>
-
     </v-toolbar>
 
     <!-- Added Alert Banner for Known Issue -->
@@ -1607,12 +1652,19 @@ onMounted(() => {
         <div class="aspect-ratio-container" :style="aspectRatioContainerStyle">
           <v-sheet 
             class="drop-zone d-flex align-center justify-center pa-0"
-            :class="{ 'is-dragging-over': isDraggingOverDropZone }" 
+            :class="{ 
+              'is-dragging-over': isDraggingOverDropZone,
+              'clickable': !droppedImageSrc 
+            }" 
             :style="dropZoneStyle as CSSProperties"
             @dragover="handleDragOver"
             @dragleave="handleDragLeave"
             @drop="handleDrop"
-            @wheel="handleWheel" 
+            @wheel="handleWheel"
+            @click="handleDropZoneClick"
+            :role="!droppedImageSrc ? 'button' : undefined"
+            :tabindex="!droppedImageSrc ? 0 : undefined"
+            @keydown.enter="handleDropZoneClick"
           >
             <!-- Scale indicator when dropzone is scaled down -->
             <div v-if="isScaledDown" class="scale-indicator">
@@ -1635,7 +1687,7 @@ onMounted(() => {
             <!-- Display Placeholder -->
             <div v-else class="text-center">
               <v-icon size="x-large" color="grey-darken-1">mdi-paperclip</v-icon>
-              <div class="text-grey-darken-1 mt-2">Drag and drop your screenshot here</div>
+              <div class="text-grey-darken-1 mt-2">Click or drag and drop your screenshot here</div>
             </div>
 
             <!-- Chat Overlay with fixed-width wrapping -->
@@ -1748,13 +1800,13 @@ onMounted(() => {
 .chat-line {
   position: relative;
   display: block;
-  font-family: 'Arial Black', sans-serif;
+  font-family: Arial, sans-serif;
   font-size: 12px;
-  line-height: 16px;
+  line-height: 1.3;
   padding: 0;
-  white-space: pre-wrap; /* Preserve spaces and wrap text */
-  overflow-wrap: break-word; /* Break words to prevent overflow */
-  width: 640px; /* Fixed width that will force consistent 80-character wrapping */ 
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  width: v-bind('chatLineWidth + "px"');
   margin: 0;
   text-shadow: 
     -1px -1px 0 #000,
@@ -1765,6 +1817,9 @@ onMounted(() => {
     1px -1px 0 #000,
     1px 0 0 #000,
     1px 1px 0 #000;
+  -webkit-font-smoothing: none !important;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .chat-text {
@@ -1772,6 +1827,8 @@ onMounted(() => {
   padding-right: 5px;
   user-select: text !important;
   cursor: text;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .with-black-bar {
@@ -1792,13 +1849,20 @@ onMounted(() => {
 }
 
 .drop-zone {
-  border: 2px dashed transparent; /* Base border */
-  transition: background-color 0.2s ease, border-color 0.2s ease; /* Smooth transition */
+  border: 2px dashed transparent;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
-.drop-zone.is-dragging-over {
-  border-color: #42a5f5; /* Highlight border when dragging */
-  background-color: #e3f2fd; /* Light blue background */
+.drop-zone.clickable:hover {
+  border-color: #42a5f5;
+  background-color: #e3f2fd;
+  cursor: pointer;
+}
+
+.drop-zone.clickable:focus {
+  outline: none;
+  border-color: #42a5f5;
+  background-color: #e3f2fd;
 }
 
 .dropped-image {
@@ -1968,6 +2032,13 @@ onMounted(() => {
   z-index: 10;
   pointer-events: none;
   border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* Add custom style for the switch if needed */
+.custom-switch {
+  /* Adjust display or margins if it doesn't align well in the toolbar */
+  display: inline-flex; /* Helps with alignment in flex containers */
+  align-items: center;
 }
 </style>
 
