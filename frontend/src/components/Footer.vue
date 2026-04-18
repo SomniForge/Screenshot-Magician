@@ -3,9 +3,42 @@
 import { ref } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.6-beta'; // Incremented version
+const version = 'v2.0.7-beta'; // Incremented version
 
 const changelog = [
+    {
+        version: 'v2.0.7-beta',
+        date: 'APR-18-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added stackable image effect layers with live preview and export support, including film grain, dust and scratches, vignette, and scanlines',
+                    'Added first-run tutorial onboarding with a persistent "don\'t show again" option and manual reopen support',
+                    'Added a Settings menu with built-in theme families, light and dark variants, custom theme creation, and shareable theme import/export'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Moved image effect controls into a non-blocking side drawer so the canvas stays visible while editing',
+                    'Improved color swatch tooltips to describe their typical GTA World usage instead of only showing raw RGB values',
+                    'Cleaned up project save UX so Save As New only appears when duplicating an existing saved project',
+                    'Expanded built-in theme options with families such as Dracula, Solarized, and Nord, each with light and dark variants'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed fast chat dragging dropping selection mid-move by keeping drag tracking active outside the overlay element',
+                    'Fixed black bar censor preview so the text no longer renders on top of the censor in the live DOM view',
+                    'Fixed home page scrolling so the Time Saved section can be reached normally',
+                    'Fixed automatic chat parsing so leading timestamps are stripped when present without requiring a manual toggle',
+                    'Fixed shell theming regressions so the sidebar, footer, and chat panel framing stay visually consistent'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.6-beta',
         date: 'APR-18-2026',

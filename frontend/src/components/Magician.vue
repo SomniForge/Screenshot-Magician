@@ -1,9 +1,11 @@
 // src/components/Magician.vue
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, watch } from 'vue';
+import { ref, computed, reactive, onMounted, onUnmounted, watch } from 'vue';
 import { type CSSProperties } from 'vue';
+import { useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
+import { createEditorThemeDefinition, editorThemeFamilies, editorThemePresets } from '@/plugins/vuetify';
 
 const chatlogText = ref('');
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
@@ -13,7 +15,6 @@ const dropZoneHeight = ref<number | null>(600); // Default height
 const fileInputRef = ref<HTMLInputElement | null>(null); // Ref for the file input element
 const chatFileInputRef = ref<HTMLInputElement | null>(null); // New ref for chat file input
 const showNewSessionDialog = ref(false); // Control dialog visibility
-const stripTimestamps = ref(false); // New state for stripping timestamps
 
 // --- Resizable Chat Panel State ---
 const chatPanelRef = ref<HTMLElement | null>(null);
@@ -78,6 +79,7 @@ interface EditorStateSnapshot {
   dropZoneWidth: number;
   dropZoneHeight: number;
   imageTransform: ChatTransform;
+  imageEffects: ImageEffectLayer[];
   chatOverlays: ChatOverlay[];
   activeChatOverlayId: string | null;
   isImageDraggingEnabled: boolean;
@@ -89,7 +91,7 @@ interface EditorStateSnapshot {
     endOffset: number;
     text: string;
   };
-  stripTimestamps: boolean;
+  stripTimestamps?: boolean;
   chatLineWidth: number;
 }
 
@@ -101,10 +103,57 @@ interface ProjectRecord {
   snapshot: EditorStateSnapshot;
 }
 
+interface ImageEffectLayer {
+  presetId: string;
+  opacity: number;
+  seed: number;
+}
+
+interface ImageEffectPreset {
+  id: string;
+  name: string;
+  description: string;
+  blendMode: GlobalCompositeOperation;
+  defaultOpacity: number;
+  supportsSeed: boolean;
+}
+
+interface TutorialStep {
+  title: string;
+  icon: string;
+  description: string;
+}
+
+interface EditorThemePalette {
+  background: string;
+  surface: string;
+  surfaceVariant: string;
+  primary: string;
+  secondary: string;
+}
+
+interface SavedEditorTheme {
+  id: string;
+  name: string;
+  colors: EditorThemePalette;
+  createdAt: string;
+}
+
+interface BuiltInThemeOption {
+  id: string;
+  name: string;
+  description: string;
+  lightPreview: string[];
+  darkPreview: string[];
+}
+
 const DEFAULT_CHAT_LINE_WIDTH = 640;
 const PROJECTS_DB_NAME = 'screenshot-magician-projects';
 const PROJECTS_STORE_NAME = 'projects';
 const PROJECTS_DB_VERSION = 1;
+const TUTORIAL_DISMISSED_COOKIE = 'magicianTutorialDismissed';
+const CUSTOM_THEMES_STORAGE_KEY = 'magicianCustomThemes';
+const ACTIVE_THEME_STORAGE_KEY = 'magicianActiveTheme';
 
 const chatOverlays = ref<ChatOverlay[]>([]);
 const activeChatOverlayId = ref<string | null>(null);
@@ -117,11 +166,30 @@ const currentProjectId = ref<string | null>(null);
 const currentProjectName = ref('');
 const showProjectsDialog = ref(false);
 const showSaveProjectDialog = ref(false);
+const showEffectsDialog = ref(false);
+const showSettingsDialog = ref(false);
+const showTutorialDialog = ref(false);
 const pendingProjectName = ref('');
 const isProjectsLoading = ref(false);
 const showColorDialog = ref(false);
 const customColorHex = ref('#ffffff');
 const customColorSwatches = ref<string[]>([]);
+const imageEffects = ref<ImageEffectLayer[]>([]);
+const dontShowTutorialAgain = ref(false);
+const tutorialStepIndex = ref(0);
+const customEditorThemes = ref<SavedEditorTheme[]>([]);
+const themeDraftName = ref('');
+const themeSharePayload = ref('');
+const themeImportPayload = ref('');
+const activeEditorThemeId = ref('default-light');
+const themeDraftColors = reactive<EditorThemePalette>({
+  background: '#f4f5f7',
+  surface: '#ffffff',
+  surfaceVariant: '#edf1f5',
+  primary: '#42a5f5',
+  secondary: '#7e57c2'
+});
+const vuetifyTheme = useTheme();
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
@@ -227,6 +295,102 @@ interface ColorMapping {
   checkPlayerName?: boolean;  // New flag
 }
 
+interface SwatchEntry {
+  color: string;
+  label: string;
+}
+
+const tutorialSteps: TutorialStep[] = [
+  {
+    title: 'Start With A Screenshot',
+    icon: 'mdi-image-plus-outline',
+    description: 'Drop or click to load your screenshot into the canvas. This becomes the base image everything else builds on.'
+  },
+  {
+    title: 'Add Chat Layers',
+    icon: 'mdi-message-plus-outline',
+    description: 'Paste or import a chatlog, then hit Parse to turn it into a movable chat layer. You can create and stack multiple chat layers.'
+  },
+  {
+    title: 'Position And Style',
+    icon: 'mdi-cursor-move',
+    description: 'Use the drag controls to move or zoom the screenshot and chats. Select text in the chat editor to apply censoring or color overrides.'
+  },
+  {
+    title: 'Polish With Effects',
+    icon: 'mdi-image-filter-center-focus',
+    description: 'Open Effects to add film grain, vignette, scanlines, and other finishing layers on top of the image for extra mood.'
+  },
+  {
+    title: 'Save Your Work',
+    icon: 'mdi-content-save-outline',
+    description: 'Use Save Project to keep your session locally, or Save Image to export the final screenshot when everything looks right.'
+  }
+];
+
+const builtInThemeDescriptions: Record<string, string> = {
+  default: 'The familiar Screenshot Magician look, now with a dark companion.',
+  steel: 'Cool blue-gray tones with a crisp studio feel.',
+  ember: 'Warm editorial tones with orange highlights.',
+  aurora: 'Sharper neon accents for a vivid control room vibe.',
+  dracula: 'Moody purple-forward contrast inspired by the Dracula palette.',
+  solarized: 'Balanced classic tones inspired by Solarized light and dark.',
+  nord: 'Muted arctic colors with a calm, technical feel.'
+};
+
+const builtInThemeOptions: BuiltInThemeOption[] = Object.entries(editorThemeFamilies).map(([familyId, family]) => ({
+  id: familyId,
+  name: family.name,
+  description: builtInThemeDescriptions[familyId] || `${family.name} in light and dark variants.`,
+  lightPreview: [family.light.background, family.light.surface, family.light.primary, family.light.secondary],
+  darkPreview: [family.dark.background, family.dark.surface, family.dark.primary, family.dark.secondary]
+}));
+
+const IMAGE_EFFECT_PRESETS: ImageEffectPreset[] = [
+  {
+    id: 'film-grain',
+    name: 'Film Grain',
+    description: 'Adds fine monochrome grain for a gritty, cinematic finish.',
+    blendMode: 'overlay',
+    defaultOpacity: 0.32,
+    supportsSeed: true
+  },
+  {
+    id: 'dust-scratches',
+    name: 'Dust & Scratches',
+    description: 'Layers specks and hairline scratches for an aged-photo look.',
+    blendMode: 'screen',
+    defaultOpacity: 0.24,
+    supportsSeed: true
+  },
+  {
+    id: 'vignette',
+    name: 'Vignette',
+    description: 'Darkens the edges to push attention toward the center.',
+    blendMode: 'multiply',
+    defaultOpacity: 0.48,
+    supportsSeed: false
+  },
+  {
+    id: 'scanlines',
+    name: 'Scanlines',
+    description: 'Adds subtle horizontal lines for a harsh broadcast feel.',
+    blendMode: 'multiply',
+    defaultOpacity: 0.22,
+    supportsSeed: false
+  },
+  {
+    id: 'vhs',
+    name: 'VHS',
+    description: 'Adds tracking noise, chroma drift, scanlines, and tape grime for a lo-fi cassette look.',
+    blendMode: 'overlay',
+    defaultOpacity: 0.42,
+    supportsSeed: true
+  }
+];
+
+const imageEffectPresetMap = new Map(IMAGE_EFFECT_PRESETS.map((preset) => [preset.id, preset]));
+
 // Replace first/last name with single character name
 const characterName = ref('');
 
@@ -304,7 +468,35 @@ const colorMappings: ColorMapping[] = [
   }
 ];
 
-const defaultColorSwatches = computed(() => {
+const defaultSwatchUsageMap = new Map<string, string[]>([
+  ['rgb(255, 255, 255)', ['Standard chat text', 'Info and alert body text']],
+  ['rgb(0, 0, 0)', ['Black bars and dark masking accents']],
+  ['rgb(214, 207, 140)', ['Radio messages']],
+  ['rgb(251, 247, 36)', ['Cellphone text', 'Car chat', 'Government chat / g)']],
+  ['rgb(241, 241, 241)', ['Normal speech and shouting']],
+  ['rgb(194, 163, 218)', ['Roleplay action lines']],
+  ['rgb(237, 168, 65)', ['Whispers']],
+  ['rgb(86, 214, 75)', ['Money received / paid', 'Payment and phone markers']],
+  ['rgb(150, 149, 149)', ['Low or lower chat']],
+  ['rgb(255, 0, 195)', ['[!] markers']],
+  ['rgb(27, 124, 222)', ['[INFO] and [ALERT] markers']],
+  ['rgb(22, 106, 189)', ['[GYM] markers']],
+  ['rgb(127, 239, 43)', ['Advertisements']],
+  ['rgb(239, 227, 0)', ['Private messages']],
+  ['rgb(139, 138, 138)', ['Out of character chat']],
+  ['rgb(241, 213, 3)', ['Megaphone']],
+  ['rgb(246, 218, 3)', ['Microphone']],
+  ['rgb(26, 131, 232)', ['Intercom']],
+  ['rgb(240, 0, 0)', ['Character kill text']],
+  ['rgb(56, 150, 243)', ['Character kill marker']]
+]);
+
+const formatSwatchLabel = (color: string, fallbackLabel = 'Custom swatch') => {
+  const uses = defaultSwatchUsageMap.get(color);
+  return uses && uses.length > 0 ? uses.join(' / ') : `${fallbackLabel} (${color})`;
+};
+
+const defaultColorSwatches = computed<SwatchEntry[]>(() => {
   const swatches = new Set<string>([
     'rgb(255, 255, 255)',
     'rgb(0, 0, 0)'
@@ -317,7 +509,10 @@ const defaultColorSwatches = computed(() => {
     }
   });
 
-  return Array.from(swatches);
+  return Array.from(swatches).map((color) => ({
+    color,
+    label: formatSwatchLabel(color, 'Default swatch')
+  }));
 });
 
 const saveCustomColorSwatches = () => {
@@ -399,6 +594,450 @@ const createDefaultChatTransform = (): ChatTransform => ({
   scale: 1
 });
 
+const createImageEffectSeed = () => Math.floor(Math.random() * 2147483647);
+
+const getImageEffectPreset = (presetId: string) => imageEffectPresetMap.get(presetId) ?? null;
+
+const cloneImageEffectLayer = (effect: Partial<ImageEffectLayer>): ImageEffectLayer => {
+  const preset = getImageEffectPreset(effect.presetId || '');
+  return {
+    presetId: preset?.id || IMAGE_EFFECT_PRESETS[0].id,
+    opacity: typeof effect.opacity === 'number' ? Math.min(1, Math.max(0.05, effect.opacity)) : (preset?.defaultOpacity ?? 0.3),
+    seed: typeof effect.seed === 'number' ? effect.seed : createImageEffectSeed()
+  };
+};
+
+const createImageEffectLayer = (presetId: string): ImageEffectLayer => {
+  const preset = getImageEffectPreset(presetId);
+  return cloneImageEffectLayer({
+    presetId,
+    opacity: preset?.defaultOpacity ?? 0.3,
+    seed: createImageEffectSeed()
+  });
+};
+
+const getImageEffectLayer = (presetId: string) =>
+  imageEffects.value.find((effect) => effect.presetId === presetId) ?? null;
+
+const isImageEffectActive = (presetId: string) =>
+  imageEffects.value.some((effect) => effect.presetId === presetId);
+
+const toggleImageEffect = (presetId: string) => {
+  const existingIndex = imageEffects.value.findIndex((effect) => effect.presetId === presetId);
+  if (existingIndex >= 0) {
+    imageEffects.value.splice(existingIndex, 1);
+    return;
+  }
+
+  imageEffects.value.push(createImageEffectLayer(presetId));
+};
+
+const setImageEffectOpacity = (presetId: string, opacity: number) => {
+  const layer = getImageEffectLayer(presetId);
+  if (!layer) return;
+  layer.opacity = Math.min(1, Math.max(0.05, opacity));
+};
+
+const rerollImageEffect = (presetId: string) => {
+  const layer = getImageEffectLayer(presetId);
+  if (!layer) return;
+  layer.seed = createImageEffectSeed();
+};
+
+const clearImageEffects = () => {
+  imageEffects.value = [];
+};
+
+const createSeededRandom = (seed: number) => {
+  let currentSeed = seed >>> 0;
+
+  return () => {
+    currentSeed += 0x6D2B79F5;
+    let t = currentSeed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+};
+
+const buildImageEffectCanvas = (effect: ImageEffectLayer, width: number, height: number) => {
+  const preset = getImageEffectPreset(effect.presetId);
+  if (!preset || width <= 0 || height <= 0) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const random = createSeededRandom(effect.seed);
+
+  switch (preset.id) {
+    case 'film-grain': {
+      const imageData = ctx.createImageData(width, height);
+      for (let i = 0; i < imageData.data.length; i += 4) {
+        const grainValue = Math.floor(80 + random() * 120);
+        const alpha = Math.floor(70 + random() * 100);
+        imageData.data[i] = grainValue;
+        imageData.data[i + 1] = grainValue;
+        imageData.data[i + 2] = grainValue;
+        imageData.data[i + 3] = alpha;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      break;
+    }
+    case 'dust-scratches': {
+      for (let i = 0; i < Math.floor((width * height) / 2200); i++) {
+        const x = random() * width;
+        const y = random() * height;
+        const radius = 0.4 + random() * 1.8;
+        ctx.fillStyle = `rgba(255, 255, 255, ${0.08 + random() * 0.4})`;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      for (let i = 0; i < Math.max(3, Math.floor(width / 220)); i++) {
+        const startX = random() * width;
+        const startY = random() * height;
+        const length = 20 + random() * Math.min(width, height) * 0.2;
+        const angle = (random() - 0.5) * Math.PI;
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.08 + random() * 0.18})`;
+        ctx.lineWidth = 0.5 + random() * 1.2;
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(startX + Math.cos(angle) * length, startY + Math.sin(angle) * length);
+        ctx.stroke();
+      }
+      break;
+    }
+    case 'vignette': {
+      const gradient = ctx.createRadialGradient(
+        width / 2,
+        height / 2,
+        Math.min(width, height) * 0.18,
+        width / 2,
+        height / 2,
+        Math.max(width, height) * 0.68
+      );
+      gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      gradient.addColorStop(0.6, 'rgba(0, 0, 0, 0.08)');
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0.78)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+      break;
+    }
+    case 'scanlines': {
+      for (let y = 0; y < height; y += 4) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+        ctx.fillRect(0, y, width, 1);
+        if ((y / 4) % 6 === 0) {
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+          ctx.fillRect(0, y + 1, width, 1);
+        }
+      }
+      break;
+    }
+    case 'vhs': {
+      const imageData = ctx.createImageData(width, height);
+      for (let i = 0; i < imageData.data.length; i += 4) {
+        const grain = Math.floor(70 + random() * 120);
+        const tintShift = Math.floor(random() * 18);
+        imageData.data[i] = grain + tintShift;
+        imageData.data[i + 1] = grain;
+        imageData.data[i + 2] = Math.max(0, grain - tintShift);
+        imageData.data[i + 3] = Math.floor(16 + random() * 44);
+      }
+      ctx.putImageData(imageData, 0, 0);
+
+      for (let y = 0; y < height; y += 3) {
+        ctx.fillStyle = y % 6 === 0 ? 'rgba(0, 0, 0, 0.24)' : 'rgba(255, 255, 255, 0.035)';
+        ctx.fillRect(0, y, width, 1);
+      }
+
+      for (let i = 0; i < Math.max(4, Math.floor(height / 120)); i++) {
+        const bandY = random() * height;
+        const bandHeight = 8 + random() * 26;
+        const bandOffset = (random() - 0.5) * 24;
+        const bandGradient = ctx.createLinearGradient(0, bandY, 0, bandY + bandHeight);
+        bandGradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
+        bandGradient.addColorStop(0.25, `rgba(255, 255, 255, ${0.05 + random() * 0.08})`);
+        bandGradient.addColorStop(0.5, `rgba(95, 214, 255, ${0.04 + random() * 0.08})`);
+        bandGradient.addColorStop(0.75, `rgba(255, 80, 120, ${0.03 + random() * 0.06})`);
+        bandGradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = bandGradient;
+        ctx.fillRect(bandOffset, bandY, width, bandHeight);
+      }
+
+      for (let i = 0; i < Math.max(14, Math.floor(width / 42)); i++) {
+        const streakY = random() * height;
+        const streakWidth = 18 + random() * (width * 0.14);
+        const streakX = random() * (width - streakWidth);
+        ctx.fillStyle = `rgba(255, 70, 110, ${0.035 + random() * 0.045})`;
+        ctx.fillRect(streakX, streakY, streakWidth, 1.2 + random() * 1.5);
+        ctx.fillStyle = `rgba(80, 210, 255, ${0.03 + random() * 0.05})`;
+        ctx.fillRect(streakX + 3, streakY + 1, streakWidth, 1 + random());
+      }
+
+      const bottomNoiseHeight = Math.max(24, Math.floor(height * 0.08));
+      const bottomStart = height - bottomNoiseHeight;
+      for (let y = bottomStart; y < height; y += 2) {
+        const jitter = (random() - 0.5) * 38;
+        const segmentWidth = width * (0.76 + random() * 0.26);
+        ctx.fillStyle = `rgba(255, 255, 255, ${0.05 + random() * 0.12})`;
+        ctx.fillRect(jitter, y, segmentWidth, 1);
+        if (random() > 0.65) {
+          ctx.fillStyle = `rgba(0, 0, 0, ${0.08 + random() * 0.14})`;
+          ctx.fillRect(0, y + 1, width, 1);
+        }
+      }
+
+      const vignette = ctx.createRadialGradient(
+        width / 2,
+        height / 2,
+        Math.min(width, height) * 0.24,
+        width / 2,
+        height / 2,
+        Math.max(width, height) * 0.7
+      );
+      vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      vignette.addColorStop(0.68, 'rgba(0, 0, 0, 0.06)');
+      vignette.addColorStop(1, 'rgba(0, 0, 0, 0.36)');
+      ctx.fillStyle = vignette;
+      ctx.fillRect(0, 0, width, height);
+      break;
+    }
+    default:
+      return null;
+  }
+
+  return canvas;
+};
+
+const activeImageEffectLayers = computed(() =>
+  imageEffects.value
+    .map((effect) => {
+      const preset = getImageEffectPreset(effect.presetId);
+      if (!preset) return null;
+      return { effect, preset };
+    })
+    .sort((a, b) => {
+      if (!a || !b) return 0;
+      return IMAGE_EFFECT_PRESETS.findIndex((preset) => preset.id === a.effect.presetId) -
+        IMAGE_EFFECT_PRESETS.findIndex((preset) => preset.id === b.effect.presetId);
+    })
+    .filter((entry): entry is { effect: ImageEffectLayer; preset: ImageEffectPreset } => entry !== null)
+);
+
+const activeImageEffectPreviews = computed(() => {
+  if (!droppedImageSrc.value) return [];
+
+  const width = dropZoneWidth.value || 800;
+  const height = dropZoneHeight.value || 600;
+
+  return activeImageEffectLayers.value
+    .map(({ effect, preset }) => {
+      const canvas = buildImageEffectCanvas(effect, width, height);
+      if (!canvas) return null;
+
+      return {
+        effect,
+        preset,
+        dataUrl: canvas.toDataURL('image/png')
+      };
+    })
+    .filter((entry): entry is { effect: ImageEffectLayer; preset: ImageEffectPreset; dataUrl: string } => entry !== null);
+});
+
+const getImageEffectPreviewStyle = (entry: { effect: ImageEffectLayer; preset: ImageEffectPreset; dataUrl: string }) => ({
+  position: 'absolute' as const,
+  inset: '0',
+  pointerEvents: 'none' as const,
+  backgroundImage: `url(${entry.dataUrl})`,
+  backgroundRepeat: 'no-repeat',
+  backgroundSize: '100% 100%',
+  opacity: entry.effect.opacity,
+  mixBlendMode: entry.preset.blendMode,
+  zIndex: 1
+});
+
+const normalizeHexColor = (value: string, fallback: string) => {
+  const normalized = value.trim();
+  return /^#([0-9a-fA-F]{6})$/.test(normalized) ? normalized.toLowerCase() : fallback.toLowerCase();
+};
+
+const resolveThemeId = (themeId: string) => {
+  if (vuetifyTheme.themes.value[themeId]) return themeId;
+
+  const legacyThemeMap: Record<string, string> = {
+    dark: 'default-light',
+    steel: 'steel-light',
+    ember: 'ember-light',
+    aurora: 'aurora-light'
+  };
+
+  return legacyThemeMap[themeId] || 'default-light';
+};
+
+const getThemeFamilyId = (themeId: string) => themeId.replace(/-(light|dark)$/, '');
+
+const getThemeVariant = (themeId: string) => themeId.endsWith('-dark') ? 'dark' : 'light';
+
+const createThemeDefinitionFromPalette = (palette: EditorThemePalette) =>
+  createEditorThemeDefinition(palette);
+
+const getThemePaletteFromDefinition = (themeId: string): EditorThemePalette => {
+  const definition = vuetifyTheme.themes.value[themeId] || editorThemePresets.dark;
+  const colors = (definition as typeof editorThemePresets.dark).colors;
+
+  return {
+    background: colors.background,
+    surface: colors.surface,
+    surfaceVariant: colors['surface-variant'],
+    primary: colors.primary,
+    secondary: colors.secondary
+  };
+};
+
+const registerCustomEditorTheme = (themeConfig: SavedEditorTheme) => {
+  vuetifyTheme.themes.value[themeConfig.id] = createThemeDefinitionFromPalette(themeConfig.colors);
+};
+
+const saveCustomEditorThemes = () => {
+  localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(customEditorThemes.value));
+};
+
+const applyEditorTheme = (themeId: string) => {
+  const resolvedThemeId = resolveThemeId(themeId);
+  if (!vuetifyTheme.themes.value[resolvedThemeId]) return;
+
+  activeEditorThemeId.value = resolvedThemeId;
+  vuetifyTheme.global.name.value = resolvedThemeId;
+  localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, resolvedThemeId);
+};
+
+const loadEditorThemes = () => {
+  const savedThemes = localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY);
+  if (savedThemes) {
+    try {
+      const parsedThemes = JSON.parse(savedThemes);
+      if (Array.isArray(parsedThemes)) {
+        customEditorThemes.value = parsedThemes
+          .filter((themeConfig) => themeConfig && typeof themeConfig.id === 'string' && typeof themeConfig.name === 'string')
+          .map((themeConfig) => ({
+            id: themeConfig.id,
+            name: themeConfig.name,
+            createdAt: themeConfig.createdAt || new Date().toISOString(),
+            colors: {
+              background: normalizeHexColor(themeConfig.colors?.background || '', '#121313'),
+              surface: normalizeHexColor(themeConfig.colors?.surface || '', '#1b1d1d'),
+              surfaceVariant: normalizeHexColor(themeConfig.colors?.surfaceVariant || '', '#232626'),
+              primary: normalizeHexColor(themeConfig.colors?.primary || '', '#42a5f5'),
+              secondary: normalizeHexColor(themeConfig.colors?.secondary || '', '#7e57c2')
+            }
+          }));
+      }
+    } catch (error) {
+      console.error('Error loading custom editor themes:', error);
+    }
+  }
+
+  customEditorThemes.value.forEach(registerCustomEditorTheme);
+
+  const storedThemeId = localStorage.getItem(ACTIVE_THEME_STORAGE_KEY) || 'default-light';
+  if (vuetifyTheme.themes.value[storedThemeId]) {
+    applyEditorTheme(storedThemeId);
+  } else {
+    applyEditorTheme(resolveThemeId(storedThemeId));
+  }
+
+  Object.assign(themeDraftColors, getThemePaletteFromDefinition(activeEditorThemeId.value));
+};
+
+const populateThemeDraftFromActiveTheme = () => {
+  Object.assign(themeDraftColors, getThemePaletteFromDefinition(activeEditorThemeId.value));
+  themeDraftName.value = '';
+};
+
+const saveCustomEditorTheme = () => {
+  const trimmedName = themeDraftName.value.trim();
+  if (!trimmedName) return;
+
+  const customTheme: SavedEditorTheme = {
+    id: `custom-theme-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: trimmedName,
+    createdAt: new Date().toISOString(),
+    colors: {
+      background: normalizeHexColor(themeDraftColors.background, '#f4f5f7'),
+      surface: normalizeHexColor(themeDraftColors.surface, '#ffffff'),
+      surfaceVariant: normalizeHexColor(themeDraftColors.surfaceVariant, '#edf1f5'),
+      primary: normalizeHexColor(themeDraftColors.primary, '#42a5f5'),
+      secondary: normalizeHexColor(themeDraftColors.secondary, '#7e57c2')
+    }
+  };
+
+  customEditorThemes.value.push(customTheme);
+  registerCustomEditorTheme(customTheme);
+  saveCustomEditorThemes();
+  applyEditorTheme(customTheme.id);
+  themeDraftName.value = '';
+};
+
+const deleteCustomEditorTheme = (themeId: string) => {
+  customEditorThemes.value = customEditorThemes.value.filter((themeConfig) => themeConfig.id !== themeId);
+  delete vuetifyTheme.themes.value[themeId];
+  saveCustomEditorThemes();
+
+  if (activeEditorThemeId.value === themeId) {
+    applyEditorTheme('default-light');
+  }
+};
+
+const exportActiveTheme = () => {
+  const customTheme = customEditorThemes.value.find((themeConfig) => themeConfig.id === activeEditorThemeId.value);
+  const payload = customTheme
+    ? customTheme
+    : {
+        id: activeEditorThemeId.value,
+        name: builtInThemeOptions.find((themeOption) => themeOption.id === getThemeFamilyId(activeEditorThemeId.value))?.name || 'Theme',
+        createdAt: new Date().toISOString(),
+        colors: getThemePaletteFromDefinition(activeEditorThemeId.value)
+      };
+
+  themeSharePayload.value = JSON.stringify(payload, null, 2);
+};
+
+const importSharedTheme = () => {
+  if (!themeImportPayload.value.trim()) return;
+
+  try {
+    const importedTheme = JSON.parse(themeImportPayload.value);
+    const trimmedName = typeof importedTheme.name === 'string' ? importedTheme.name.trim() : '';
+    if (!trimmedName) return;
+
+    const themeConfig: SavedEditorTheme = {
+      id: `custom-theme-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: trimmedName,
+      createdAt: new Date().toISOString(),
+      colors: {
+        background: normalizeHexColor(importedTheme.colors?.background || '', '#f4f5f7'),
+        surface: normalizeHexColor(importedTheme.colors?.surface || '', '#ffffff'),
+        surfaceVariant: normalizeHexColor(importedTheme.colors?.surfaceVariant || '', '#edf1f5'),
+        primary: normalizeHexColor(importedTheme.colors?.primary || '', '#42a5f5'),
+        secondary: normalizeHexColor(importedTheme.colors?.secondary || '', '#7e57c2')
+      }
+    };
+
+    customEditorThemes.value.push(themeConfig);
+    registerCustomEditorTheme(themeConfig);
+    saveCustomEditorThemes();
+    applyEditorTheme(themeConfig.id);
+    themeImportPayload.value = '';
+  } catch (error) {
+    console.error('Error importing shared theme:', error);
+  }
+};
+
 const getChatOverlayName = (rawText: string, overlayIndex: number) => {
   const firstLine = rawText
     .split('\n')
@@ -433,13 +1072,13 @@ const createEditorSnapshot = (): EditorStateSnapshot => ({
   dropZoneWidth: dropZoneWidth.value || 800,
   dropZoneHeight: dropZoneHeight.value || 600,
   imageTransform: { ...imageTransform },
+  imageEffects: imageEffects.value.map((effect) => cloneImageEffectLayer(effect)),
   chatOverlays: chatOverlays.value.map((overlay, index) => cloneChatOverlay(overlay, index)),
   activeChatOverlayId: activeChatOverlayId.value,
   isImageDraggingEnabled: isImageDraggingEnabled.value,
   isChatDraggingEnabled: isChatDraggingEnabled.value,
   showBlackBars: showBlackBars.value,
   selectedText: { ...selectedText },
-  stripTimestamps: stripTimestamps.value,
   chatLineWidth: chatLineWidth.value
 });
 
@@ -453,11 +1092,13 @@ const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
   dropZoneWidth.value = snapshot.dropZoneWidth || 800;
   dropZoneHeight.value = snapshot.dropZoneHeight || 600;
   Object.assign(imageTransform, snapshot.imageTransform || { x: 0, y: 0, scale: 1 });
+  imageEffects.value = Array.isArray(snapshot.imageEffects)
+    ? snapshot.imageEffects.map((effect) => cloneImageEffectLayer(effect))
+    : [];
   isImageDraggingEnabled.value = snapshot.isImageDraggingEnabled || false;
   isChatDraggingEnabled.value = snapshot.isChatDraggingEnabled || false;
   showBlackBars.value = snapshot.showBlackBars || false;
   Object.assign(selectedText, snapshot.selectedText || { lineIndex: -1, startOffset: 0, endOffset: 0, text: '' });
-  stripTimestamps.value = snapshot.stripTimestamps || false;
   chatLineWidth.value = snapshot.chatLineWidth || DEFAULT_CHAT_LINE_WIDTH;
   chatOverlays.value = Array.isArray(snapshot.chatOverlays)
     ? snapshot.chatOverlays.map((overlay, index) => cloneChatOverlay(overlay, index))
@@ -602,44 +1243,32 @@ const clearChatlog = () => {
   selectedText.text = '';
 };
 
+const TIMESTAMP_PREFIX_PATTERN = /^\[\d{2}:\d{2}:\d{2}\]\s*/;
+
+const stripTimestampPrefix = (line: string) =>
+  line.replace(TIMESTAMP_PREFIX_PATTERN, '');
+
+const getTimestampPrefixLength = (line: string) => {
+  const timestampMatch = line.match(TIMESTAMP_PREFIX_PATTERN);
+  return timestampMatch ? timestampMatch[0].length : 0;
+};
+
 const parseChatText = (rawText: string) => {
   const lines = rawText.split('\n').filter(line => line.trim() !== '');
 
   return lines.map((line, index) => {
-    let processedText = line;
-
-    if (stripTimestamps.value) {
-      processedText = processedText.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
-    }
-
     return {
       id: index,
-      text: processedText
+      text: stripTimestampPrefix(line)
     };
   });
 };
 
-const getDisplayedLineText = (line: string) => {
-  if (!stripTimestamps.value) {
-    return line;
-  }
-
-  return line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
-};
+const getDisplayedLineText = (line: string) => stripTimestampPrefix(line);
 
 const getDisplayedSelectionRange = (line: string, rawStartOffset: number, rawEndOffset: number) => {
   const displayedLine = getDisplayedLineText(line);
-
-  if (!stripTimestamps.value) {
-    return {
-      displayedLine,
-      startOffset: rawStartOffset,
-      endOffset: rawEndOffset
-    };
-  }
-
-  const timestampMatch = line.match(/^\[\d{2}:\d{2}:\d{2}\]\s*/);
-  const strippedLength = timestampMatch ? timestampMatch[0].length : 0;
+  const strippedLength = getTimestampPrefixLength(line);
 
   return {
     displayedLine,
@@ -780,7 +1409,14 @@ const buildStyledLineHtml = (overlay: ChatOverlay, lineIndex: number, text: stri
       if (run.censorType === CensorType.Blur) classNames.push('censored-blur');
 
       const classAttribute = classNames.length > 0 ? ` class="${classNames.join(' ')}"` : '';
-      return `<span${classAttribute} style="color: ${run.color}">${escapeHtml(run.text)}</span>`;
+      const styleParts = [`color: ${run.color}`];
+
+      if (run.censorType === CensorType.Invisible || run.censorType === CensorType.BlackBar) {
+        styleParts.push('color: transparent');
+      }
+
+      const styleAttribute = ` style="${styleParts.join('; ')}"`;
+      return `<span${classAttribute}${styleAttribute}>${escapeHtml(run.text)}</span>`;
     })
     .join('');
 
@@ -1060,6 +1696,8 @@ const handleChatMouseDown = (event: MouseEvent, overlayId: string) => {
   chatPanStartPos.x = overlay.transform.x;
   chatPanStartPos.y = overlay.transform.y;
   document.body.style.userSelect = 'none';
+  document.addEventListener('mousemove', handleChatMouseMove);
+  document.addEventListener('mouseup', handleChatMouseUpOrLeave);
 };
 
 const handleChatMouseMove = (event: MouseEvent) => {
@@ -1082,6 +1720,9 @@ const handleChatMouseUpOrLeave = (event?: MouseEvent) => {
     isChatPanning.value = false;
     document.body.style.userSelect = '';
   }
+
+  document.removeEventListener('mousemove', handleChatMouseMove);
+  document.removeEventListener('mouseup', handleChatMouseUpOrLeave);
 };
 
 // --- Chat Zoom Handler ---
@@ -1285,6 +1926,17 @@ const saveImage = async () => {
 
     ctx.restore(); // Restore context after drawing image
 
+    activeImageEffectLayers.value.forEach(({ effect, preset }) => {
+      const effectCanvas = buildImageEffectCanvas(effect, canvas.width, canvas.height);
+      if (!effectCanvas) return;
+
+      ctx.save();
+      ctx.globalAlpha = effect.opacity;
+      ctx.globalCompositeOperation = preset.blendMode;
+      ctx.drawImage(effectCanvas, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    });
+
     const visibleChatOverlays = chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0);
 
     if (visibleChatOverlays.length > 0) {
@@ -1475,6 +2127,7 @@ const resetSession = () => {
   imageTransform.x = 0;
   imageTransform.y = 0;
   imageTransform.scale = 1;
+  imageEffects.value = [];
   
   // Reset image dragging state
   isImageDraggingEnabled.value = false;
@@ -1523,48 +2176,42 @@ const selectedText = reactive({
 // Add a key to force re-render when censoring changes
 const renderKey = ref(0);
 
-// Update cycleCensorType to trigger re-render
-const cycleCensorType = () => {
+const getSelectedCensorRegionIndex = () => {
   if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
-
-  console.log('Applying censoring:', selectedText);
-
-  // Find existing censor for this region
-  const existingIndex = activeChatOverlay.value.censoredRegions.findIndex(
-    region => region.lineIndex === selectedText.lineIndex &&
-             region.startOffset === selectedText.startOffset &&
-             region.endOffset === selectedText.endOffset
+  return activeChatOverlay.value.censoredRegions.findIndex(
+    (region) => region.lineIndex === selectedText.lineIndex &&
+      region.startOffset === selectedText.startOffset &&
+      region.endOffset === selectedText.endOffset
   );
+};
 
-  if (existingIndex === -1) {
-    // Add new censor starting with Invisible
-    console.log('Adding new censor region');
+const applyCensorType = (type: CensorType) => {
+  if (selectedText.lineIndex === -1 || !activeChatOverlay.value || type === CensorType.None) return;
+
+  const existingIndex = getSelectedCensorRegionIndex();
+
+  if (existingIndex === undefined || existingIndex === -1) {
     activeChatOverlay.value.censoredRegions.push({
       lineIndex: selectedText.lineIndex,
       startOffset: selectedText.startOffset,
       endOffset: selectedText.endOffset,
-      type: CensorType.Invisible
+      type
     });
   } else {
-    const current = activeChatOverlay.value.censoredRegions[existingIndex];
-    console.log('Cycling existing censor:', current.type);
-    switch (current.type) {
-      case CensorType.Invisible:
-        current.type = CensorType.BlackBar;
-        break;
-      case CensorType.BlackBar:
-        current.type = CensorType.Blur;
-        break;
-      case CensorType.Blur:
-        // Remove censoring
-        activeChatOverlay.value.censoredRegions.splice(existingIndex, 1);
-        break;
-    }
+    activeChatOverlay.value.censoredRegions[existingIndex].type = type;
   }
 
-  // Force re-render
   renderKey.value++;
-  console.log('Updated censor regions:', activeChatOverlay.value.censoredRegions);
+};
+
+const clearCensorType = () => {
+  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
+
+  const existingIndex = getSelectedCensorRegionIndex();
+  if (existingIndex === undefined || existingIndex === -1) return;
+
+  activeChatOverlay.value.censoredRegions.splice(existingIndex, 1);
+  renderKey.value++;
 };
 
 const openColorDialog = () => {
@@ -1720,6 +2367,44 @@ const loadCharacterName = () => {
   }
 };
 
+const openTutorial = () => {
+  tutorialStepIndex.value = 0;
+  showTutorialDialog.value = true;
+};
+
+const closeTutorial = () => {
+  if (dontShowTutorialAgain.value) {
+    Cookies.set(TUTORIAL_DISMISSED_COOKIE, 'true', { expires: 365 });
+  } else {
+    Cookies.remove(TUTORIAL_DISMISSED_COOKIE);
+  }
+
+  showTutorialDialog.value = false;
+};
+
+const showTutorialIfNeeded = () => {
+  const tutorialDismissed = Cookies.get(TUTORIAL_DISMISSED_COOKIE) === 'true';
+  dontShowTutorialAgain.value = tutorialDismissed;
+
+  if (!tutorialDismissed) {
+    openTutorial();
+  }
+};
+
+const goToNextTutorialStep = () => {
+  if (tutorialStepIndex.value >= tutorialSteps.length - 1) {
+    closeTutorial();
+    return;
+  }
+
+  tutorialStepIndex.value += 1;
+};
+
+const goToPreviousTutorialStep = () => {
+  if (tutorialStepIndex.value <= 0) return;
+  tutorialStepIndex.value -= 1;
+};
+
 // Initialize flex layout values to create a stable layout
 const initializeLayoutValues = () => {
   // Ensure we're using string percentages for flex basis values
@@ -1736,13 +2421,13 @@ watch([
   dropZoneWidth,
   dropZoneHeight,
   () => ({ ...imageTransform }),
+  imageEffects,
   chatOverlays,
   activeChatOverlayId,
   isImageDraggingEnabled,
   isChatDraggingEnabled,
   showBlackBars,
   () => ({ ...selectedText }),
-  stripTimestamps,
   chatLineWidth
 ], () => {
   saveEditorState();
@@ -1750,10 +2435,12 @@ watch([
 
 // Load saved state when component mounts
 onMounted(() => {
+  loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
   loadEditorState();
   refreshProjectList();
+  showTutorialIfNeeded();
   
   // Make sure layout is initialized correctly
   initializeLayoutValues();
@@ -1767,6 +2454,10 @@ onMounted(() => {
       calculateDropzoneScale();
     });
   }, 100);
+});
+
+onUnmounted(() => {
+  handleChatMouseUpOrLeave();
 });
 
 watch(chatLineWidth, (newValue) => {
@@ -1888,22 +2579,14 @@ const handleDropZoneClick = (event: Event) => {
             <v-btn v-bind="props" icon="mdi-content-save-cog-outline" @click="saveCurrentProject"></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Strip Timestamps from Chatlog" location="bottom">
+        <v-tooltip text="Settings" location="bottom">
           <template v-slot:activator="{ props }">
-            <v-switch
-              v-bind="props"
-              v-model="stripTimestamps"
-              color="primary"
-              density="compact"
-              hide-details
-              class="ms-2 me-1 custom-switch"
-              @change="reparseChatOverlays" 
-            ></v-switch>
+            <v-btn v-bind="props" icon="mdi-cog-outline" @click="showSettingsDialog = true"></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Import Layer Image (Coming Soon!)" location="bottom">
+        <v-tooltip text="Show Tutorial" location="bottom">
           <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-search" disabled></v-btn>
+            <v-btn v-bind="props" icon="mdi-help-circle-outline" @click="openTutorial"></v-btn>
           </template>
         </v-tooltip>
       </div>
@@ -1989,11 +2672,6 @@ const handleDropZoneClick = (event: Event) => {
             ></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Enable Layer Drag (Coming Soon!)" location="bottom">
-          <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-triple-outline" disabled></v-btn>
-          </template>
-        </v-tooltip>
       </div>
 
       <v-spacer></v-spacer>
@@ -2009,26 +2687,53 @@ const handleDropZoneClick = (event: Event) => {
             ></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Create Layer (Coming Soon!)" location="bottom">
+        <v-btn
+          prepend-icon="mdi-image-filter-center-focus"
+          append-icon="mdi-chevron-down"
+          text="Effects"
+          class="text-none"
+          :color="imageEffects.length > 0 ? 'primary' : undefined"
+          @click="showEffectsDialog = true"
+        ></v-btn>
+        <v-menu location="bottom">
           <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-plus" disabled></v-btn>
-          </template>
-        </v-tooltip>
-        <v-tooltip text="Remove Layer (Coming Soon!)" location="bottom">
-          <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-layers-minus" disabled></v-btn>
-          </template>
-        </v-tooltip>
-        <v-tooltip text="Censor Selection" location="bottom">
-          <template v-slot:activator="{ props }">
-            <v-btn 
-              v-bind="props" 
-              icon="mdi-eye-off"
-              @click="cycleCensorType"
+            <v-btn
+              v-bind="props"
+              prepend-icon="mdi-eye-off"
+              append-icon="mdi-chevron-down"
+              text="Censor"
+              class="text-none"
               :disabled="selectedText.lineIndex === -1"
             ></v-btn>
           </template>
-        </v-tooltip>
+          <v-list density="comfortable">
+            <v-list-item
+              prepend-icon="mdi-text-box-outline"
+              title="Invisible"
+              subtitle="Hide the selected text entirely"
+              @click="applyCensorType(CensorType.Invisible)"
+            ></v-list-item>
+            <v-list-item
+              prepend-icon="mdi-minus-box"
+              title="Black Bar"
+              subtitle="Cover the selection with a solid black bar"
+              @click="applyCensorType(CensorType.BlackBar)"
+            ></v-list-item>
+            <v-list-item
+              prepend-icon="mdi-blur"
+              title="Blur"
+              subtitle="Blur the selected text while keeping its space"
+              @click="applyCensorType(CensorType.Blur)"
+            ></v-list-item>
+            <v-divider></v-divider>
+            <v-list-item
+              prepend-icon="mdi-close-circle-outline"
+              title="Remove Censor"
+              subtitle="Clear censoring from the selected text"
+              @click="clearCensorType"
+            ></v-list-item>
+          </v-list>
+        </v-menu>
         <v-tooltip text="Color Selection" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn
@@ -2081,6 +2786,293 @@ const handleDropZoneClick = (event: Event) => {
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="showTutorialDialog" max-width="760">
+      <v-card class="tutorial-card">
+        <v-card-title class="d-flex align-center justify-space-between">
+          <div>
+            <div class="text-h6">Welcome to Screenshot Magician</div>
+            <div class="text-body-2 text-medium-emphasis">
+              A quick walkthrough so the editor feels easier to understand on first open.
+            </div>
+          </div>
+          <v-chip size="small" variant="tonal" color="primary">
+            Step {{ tutorialStepIndex + 1 }} / {{ tutorialSteps.length }}
+          </v-chip>
+        </v-card-title>
+        <v-card-text>
+          <v-window v-model="tutorialStepIndex" class="tutorial-window">
+            <v-window-item
+              v-for="(step, index) in tutorialSteps"
+              :key="step.title"
+              :value="index"
+            >
+              <div class="tutorial-step">
+                <div class="tutorial-icon-wrap">
+                  <v-icon :icon="step.icon" size="36"></v-icon>
+                </div>
+                <div class="text-h6 mb-3">{{ step.title }}</div>
+                <div class="text-body-1 text-medium-emphasis">
+                  {{ step.description }}
+                </div>
+              </div>
+            </v-window-item>
+          </v-window>
+
+          <div class="tutorial-progress mt-6">
+            <div
+              v-for="(step, index) in tutorialSteps"
+              :key="`${step.title}-dot`"
+              :class="['tutorial-progress-dot', { 'is-active': tutorialStepIndex === index }]"
+            ></div>
+          </div>
+        </v-card-text>
+        <v-card-actions class="tutorial-actions">
+          <v-checkbox
+            v-model="dontShowTutorialAgain"
+            label="Don't show this again"
+            density="compact"
+            hide-details
+          ></v-checkbox>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="closeTutorial">
+            I know what I'm doing
+          </v-btn>
+          <v-btn
+            variant="text"
+            :disabled="tutorialStepIndex === 0"
+            @click="goToPreviousTutorialStep"
+          >
+            Back
+          </v-btn>
+          <v-btn color="primary" @click="goToNextTutorialStep">
+            {{ tutorialStepIndex === tutorialSteps.length - 1 ? 'Finish' : 'Next' }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="showSettingsDialog" max-width="900">
+      <v-card>
+        <v-card-title class="d-flex align-center justify-space-between">
+          <div>
+            <div class="text-h6">Settings</div>
+            <div class="text-body-2 text-medium-emphasis">
+              Configure how the editor looks today, with room for more preferences later.
+            </div>
+          </div>
+          <v-btn icon="mdi-close" variant="text" @click="showSettingsDialog = false"></v-btn>
+        </v-card-title>
+        <v-card-text>
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
+              <div class="text-subtitle-1">Theme Presets</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Switch the whole editor between built-in looks.
+              </div>
+            </div>
+            <div class="theme-grid">
+              <div
+                v-for="themeOption in builtInThemeOptions"
+                :key="themeOption.id"
+                :class="['theme-card', { 'is-active': getThemeFamilyId(activeEditorThemeId) === themeOption.id }]"
+              >
+                <div class="theme-variant-label text-caption text-medium-emphasis">Light</div>
+                <div class="theme-swatch-row">
+                  <span
+                    v-for="(color, index) in themeOption.lightPreview"
+                    :key="`${themeOption.id}-light-${index}`"
+                    class="theme-swatch"
+                    :style="{ backgroundColor: color }"
+                  ></span>
+                </div>
+                <div class="theme-variant-label text-caption text-medium-emphasis mt-2">Dark</div>
+                <div class="theme-swatch-row theme-swatch-row-dark">
+                  <span
+                    v-for="(color, index) in themeOption.darkPreview"
+                    :key="`${themeOption.id}-dark-${index}`"
+                    class="theme-swatch"
+                    :style="{ backgroundColor: color }"
+                  ></span>
+                </div>
+                <div class="text-subtitle-2">{{ themeOption.name }}</div>
+                <div class="text-caption text-medium-emphasis mb-3">{{ themeOption.description }}</div>
+                <div class="theme-card-actions">
+                  <v-btn
+                    size="small"
+                    :variant="activeEditorThemeId === `${themeOption.id}-light` ? 'flat' : 'tonal'"
+                    :color="activeEditorThemeId === `${themeOption.id}-light` ? 'primary' : undefined"
+                    @click.stop="applyEditorTheme(`${themeOption.id}-light`)"
+                  >
+                    Light
+                  </v-btn>
+                  <v-btn
+                    size="small"
+                    :variant="activeEditorThemeId === `${themeOption.id}-dark` ? 'flat' : 'tonal'"
+                    :color="activeEditorThemeId === `${themeOption.id}-dark` ? 'primary' : undefined"
+                    @click.stop="applyEditorTheme(`${themeOption.id}-dark`)"
+                  >
+                    Dark
+                  </v-btn>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
+              <div class="text-subtitle-1">Custom Themes</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Build your own look, save it locally, and share it with other users.
+              </div>
+            </div>
+
+            <div class="theme-editor-grid">
+              <div class="theme-editor-fields">
+                <v-text-field
+                  v-model="themeDraftName"
+                  label="Theme Name"
+                  variant="outlined"
+                  density="comfortable"
+                  hide-details
+                  class="mb-3"
+                ></v-text-field>
+
+                <div class="theme-color-grid">
+                  <label class="theme-color-field">
+                    <span class="text-caption">Background</span>
+                    <input v-model="themeDraftColors.background" type="color" class="native-color-picker theme-picker" />
+                    <v-text-field v-model="themeDraftColors.background" variant="outlined" density="comfortable" hide-details></v-text-field>
+                  </label>
+                  <label class="theme-color-field">
+                    <span class="text-caption">Surface</span>
+                    <input v-model="themeDraftColors.surface" type="color" class="native-color-picker theme-picker" />
+                    <v-text-field v-model="themeDraftColors.surface" variant="outlined" density="comfortable" hide-details></v-text-field>
+                  </label>
+                  <label class="theme-color-field">
+                    <span class="text-caption">Surface Variant</span>
+                    <input v-model="themeDraftColors.surfaceVariant" type="color" class="native-color-picker theme-picker" />
+                    <v-text-field v-model="themeDraftColors.surfaceVariant" variant="outlined" density="comfortable" hide-details></v-text-field>
+                  </label>
+                  <label class="theme-color-field">
+                    <span class="text-caption">Primary</span>
+                    <input v-model="themeDraftColors.primary" type="color" class="native-color-picker theme-picker" />
+                    <v-text-field v-model="themeDraftColors.primary" variant="outlined" density="comfortable" hide-details></v-text-field>
+                  </label>
+                  <label class="theme-color-field">
+                    <span class="text-caption">Secondary</span>
+                    <input v-model="themeDraftColors.secondary" type="color" class="native-color-picker theme-picker" />
+                    <v-text-field v-model="themeDraftColors.secondary" variant="outlined" density="comfortable" hide-details></v-text-field>
+                  </label>
+                </div>
+
+                <div class="d-flex ga-2 mt-4 flex-wrap">
+                  <v-btn variant="tonal" @click="populateThemeDraftFromActiveTheme">
+                    Use Active Theme
+                  </v-btn>
+                  <v-btn color="primary" @click="saveCustomEditorTheme">
+                    Save Custom Theme
+                  </v-btn>
+                </div>
+              </div>
+
+              <div class="theme-saved-list">
+                <div class="text-subtitle-2 mb-2">Saved Custom Themes</div>
+                <v-list density="comfortable" bg-color="transparent" class="theme-list">
+                  <v-list-item
+                    v-for="themeConfig in customEditorThemes"
+                    :key="themeConfig.id"
+                    rounded="lg"
+                    :active="activeEditorThemeId === themeConfig.id"
+                  >
+                    <template v-slot:prepend>
+                      <div class="theme-inline-swatches">
+                        <span class="theme-inline-swatch" :style="{ backgroundColor: themeConfig.colors.background }"></span>
+                        <span class="theme-inline-swatch" :style="{ backgroundColor: themeConfig.colors.surface }"></span>
+                        <span class="theme-inline-swatch" :style="{ backgroundColor: themeConfig.colors.primary }"></span>
+                      </div>
+                    </template>
+                    <v-list-item-title>{{ themeConfig.name }}</v-list-item-title>
+                    <v-list-item-subtitle>
+                      Saved {{ new Date(themeConfig.createdAt).toLocaleDateString() }}
+                    </v-list-item-subtitle>
+                    <template v-slot:append>
+                      <div class="d-flex ga-1">
+                        <v-btn size="small" variant="text" color="primary" @click="applyEditorTheme(themeConfig.id)">
+                          Apply
+                        </v-btn>
+                        <v-btn size="small" variant="text" color="error" @click="deleteCustomEditorTheme(themeConfig.id)">
+                          Delete
+                        </v-btn>
+                      </div>
+                    </template>
+                  </v-list-item>
+                </v-list>
+                <div v-if="customEditorThemes.length === 0" class="text-caption text-medium-emphasis">
+                  No custom themes saved yet.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
+              <div class="text-subtitle-1">Share Themes</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Export your current theme to JSON or import one someone else made.
+              </div>
+            </div>
+
+            <v-row>
+              <v-col cols="12" md="6">
+                <div class="text-subtitle-2 mb-2">Export Current Theme</div>
+                <v-textarea
+                  v-model="themeSharePayload"
+                  variant="outlined"
+                  rows="8"
+                  auto-grow
+                  readonly
+                  hide-details
+                ></v-textarea>
+                <v-btn class="mt-3" variant="tonal" color="primary" @click="exportActiveTheme">
+                  Generate Theme JSON
+                </v-btn>
+              </v-col>
+              <v-col cols="12" md="6">
+                <div class="text-subtitle-2 mb-2">Import Shared Theme</div>
+                <v-textarea
+                  v-model="themeImportPayload"
+                  variant="outlined"
+                  rows="8"
+                  auto-grow
+                  hide-details
+                  placeholder='Paste shared theme JSON here'
+                ></v-textarea>
+                <v-btn class="mt-3" color="primary" @click="importSharedTheme">
+                  Import Theme
+                </v-btn>
+              </v-col>
+            </v-row>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <div class="text-subtitle-1">Other Settings</div>
+              <div class="text-body-2 text-medium-emphasis">
+                More editor defaults and accessibility options can live here as the tool grows.
+              </div>
+            </div>
+            <v-btn variant="tonal" color="primary" @click="showSettingsDialog = false; openTutorial()">
+              Reopen Tutorial
+            </v-btn>
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showSettingsDialog = false">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="showSaveProjectDialog" max-width="520">
       <v-card>
         <v-card-title class="text-h6">
@@ -2102,13 +3094,108 @@ const handleDropZoneClick = (event: Event) => {
         <v-card-actions>
           <v-spacer></v-spacer>
           <v-btn variant="text" @click="showSaveProjectDialog = false">Cancel</v-btn>
-          <v-btn variant="text" color="secondary" @click="saveProject(true)">Save As New</v-btn>
+          <v-btn
+            v-if="currentProjectId"
+            variant="text"
+            color="secondary"
+            @click="saveProject(true)"
+          >
+            Save As New
+          </v-btn>
           <v-btn color="primary" variant="text" @click="saveProject(false)">
             {{ currentProjectId ? 'Save' : 'Create' }}
           </v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <v-navigation-drawer
+      v-model="showEffectsDialog"
+      location="right"
+      temporary
+      :scrim="false"
+      width="420"
+      class="effects-drawer"
+    >
+      <div class="effects-drawer-content">
+        <div class="d-flex align-center justify-space-between mb-4">
+          <div>
+            <div class="text-h6">Image Effects</div>
+            <div class="text-body-2 text-medium-emphasis">
+              Keep this panel open while you tweak the canvas.
+            </div>
+          </div>
+          <v-btn icon="mdi-close" variant="text" @click="showEffectsDialog = false"></v-btn>
+        </div>
+
+        <div class="d-flex align-center justify-space-between mb-4">
+          <v-chip size="small" variant="tonal" color="primary">
+            {{ imageEffects.length }} active
+          </v-chip>
+          <v-btn variant="text" color="error" @click="clearImageEffects">
+            Clear All
+          </v-btn>
+        </div>
+
+        <div class="text-body-2 mb-4">
+          Stack texture and finishing layers over the screenshot to push the final mood. Every active effect previews live and exports in the same order shown here.
+        </div>
+
+        <div class="effect-preset-list">
+          <v-card
+            v-for="preset in IMAGE_EFFECT_PRESETS"
+            :key="preset.id"
+            variant="outlined"
+            class="mb-3"
+          >
+            <v-card-text>
+              <div class="d-flex align-start justify-space-between ga-4 flex-wrap">
+                <div class="effect-copy">
+                  <div class="text-subtitle-1">{{ preset.name }}</div>
+                  <div class="text-body-2 text-medium-emphasis">
+                    {{ preset.description }}
+                  </div>
+                </div>
+                <v-btn
+                  :color="isImageEffectActive(preset.id) ? 'primary' : undefined"
+                  :variant="isImageEffectActive(preset.id) ? 'flat' : 'tonal'"
+                  @click="toggleImageEffect(preset.id)"
+                >
+                  {{ isImageEffectActive(preset.id) ? 'Enabled' : 'Enable' }}
+                </v-btn>
+              </div>
+
+              <div v-if="getImageEffectLayer(preset.id)" class="mt-4">
+                <div class="d-flex align-center justify-space-between mb-2">
+                  <span class="text-caption text-medium-emphasis">Opacity</span>
+                  <span class="text-caption text-medium-emphasis">
+                    {{ Math.round((getImageEffectLayer(preset.id)?.opacity || 0) * 100) }}%
+                  </span>
+                </div>
+                <div class="d-flex align-center ga-3">
+                  <v-slider
+                    :model-value="getImageEffectLayer(preset.id)?.opacity || preset.defaultOpacity"
+                    min="0.05"
+                    max="1"
+                    step="0.05"
+                    hide-details
+                    color="primary"
+                    @update:model-value="setImageEffectOpacity(preset.id, Number($event))"
+                  ></v-slider>
+                  <v-btn
+                    v-if="preset.supportsSeed"
+                    icon="mdi-dice-5-outline"
+                    variant="text"
+                    title="Generate a new texture pattern"
+                    @click="rerollImageEffect(preset.id)"
+                  ></v-btn>
+                </div>
+              </div>
+            </v-card-text>
+          </v-card>
+        </div>
+      </div>
+    </v-navigation-drawer>
 
     <v-dialog v-model="showColorDialog" max-width="620">
       <v-card>
@@ -2120,13 +3207,14 @@ const handleDropZoneClick = (event: Event) => {
           <div class="text-subtitle-2 mb-2">Default Swatches</div>
           <div class="swatch-grid mb-4">
             <button
-              v-for="color in defaultColorSwatches"
-              :key="color"
+              v-for="swatch in defaultColorSwatches"
+              :key="swatch.color"
               type="button"
               class="color-swatch"
-              :style="{ backgroundColor: color }"
-              :title="color"
-              @click="applyManualColorOverride(color)"
+              :style="{ backgroundColor: swatch.color }"
+              :title="swatch.label"
+              :aria-label="swatch.label"
+              @click="applyManualColorOverride(swatch.color)"
             ></button>
           </div>
 
@@ -2138,7 +3226,8 @@ const handleDropZoneClick = (event: Event) => {
               type="button"
               class="color-swatch"
               :style="{ backgroundColor: color }"
-              :title="color"
+              :title="formatSwatchLabel(color)"
+              :aria-label="formatSwatchLabel(color)"
               @click="applyManualColorOverride(color)"
             ></button>
           </div>
@@ -2285,8 +3374,15 @@ const handleDropZoneClick = (event: Event) => {
               @mouseup="handleImageMouseUpOrLeave"
               @mouseleave="handleImageMouseUpOrLeave"
             />
+            <div
+              v-for="preview in activeImageEffectPreviews"
+              v-show="droppedImageSrc"
+              :key="`${preview.effect.presetId}-${preview.effect.seed}`"
+              class="image-effect-layer"
+              :style="getImageEffectPreviewStyle(preview) as CSSProperties"
+            ></div>
             <!-- Display Placeholder -->
-            <div v-else class="text-center">
+            <div v-if="!droppedImageSrc" class="text-center">
               <v-icon size="x-large" color="grey-darken-1">mdi-paperclip</v-icon>
               <div class="text-grey-darken-1 mt-2">Click or drag and drop your screenshot here</div>
             </div>
@@ -2300,7 +3396,6 @@ const handleDropZoneClick = (event: Event) => {
               @mousedown="handleChatMouseDown($event, overlay.id)"
               @mousemove="handleChatMouseMove"
               @mouseup="handleChatMouseUpOrLeave"
-              @mouseleave="handleChatMouseUpOrLeave"
               @wheel="handleChatWheel($event, overlay.id)"
               :style="getChatStyles(overlay)"
             >
@@ -2331,7 +3426,7 @@ const handleDropZoneClick = (event: Event) => {
 
       <!-- Right side chatlog panel -->
       <div class="chatlog-panel" ref="chatPanelRef" :style="{ width: chatPanelFlexBasis }">
-        <v-sheet class="fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
+        <v-sheet class="chatlog-panel-sheet fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
           <div class="project-status mb-3">
             <div class="text-subtitle-2">Project</div>
             <div class="text-body-2">
@@ -2456,6 +3551,7 @@ const handleDropZoneClick = (event: Event) => {
   overflow: visible;
   transform-origin: top left;
   will-change: transform;
+  z-index: 2;
 }
 
 .chat-line {
@@ -2537,6 +3633,12 @@ const handleDropZoneClick = (event: Event) => {
   width: 100%;
   height: 100%;
   object-fit: contain; /* Scale image while preserving aspect ratio */
+  z-index: 0;
+}
+
+.image-effect-layer {
+  border-radius: inherit;
+  z-index: 1;
 }
 
 .chatlog-textarea {
@@ -2670,6 +3772,11 @@ const handleDropZoneClick = (event: Event) => {
   padding: 4px;
 }
 
+.chatlog-panel-sheet {
+  background: #131213 !important;
+  color: #f3f4f6 !important;
+}
+
 .swatch-grid {
   display: flex;
   flex-wrap: wrap;
@@ -2682,6 +3789,174 @@ const handleDropZoneClick = (event: Event) => {
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.35);
   cursor: pointer;
+}
+
+.effect-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.effects-drawer-content {
+  height: 100%;
+  overflow-y: auto;
+  padding: 20px 18px 24px;
+  background: rgb(var(--v-theme-surface));
+}
+
+.tutorial-card {
+  overflow: hidden;
+}
+
+.tutorial-window {
+  min-height: 240px;
+}
+
+.tutorial-step {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 12px 20px;
+}
+
+.tutorial-icon-wrap {
+  width: 72px;
+  height: 72px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+  background: linear-gradient(135deg, rgba(66, 165, 245, 0.18), rgba(171, 71, 188, 0.18));
+  color: rgb(var(--v-theme-primary));
+}
+
+.tutorial-progress {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.tutorial-progress-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  transition: transform 0.2s ease, background-color 0.2s ease;
+}
+
+.tutorial-progress-dot.is-active {
+  background: rgb(var(--v-theme-primary));
+  transform: scale(1.2);
+}
+
+.tutorial-actions {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-section + .settings-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 24px;
+}
+
+.settings-section-header {
+  margin-bottom: 16px;
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.theme-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  color: inherit;
+  text-align: left;
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+}
+
+.theme-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.theme-card.is-active {
+  border-color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), 0.08);
+}
+
+.theme-swatch-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.theme-swatch-row-dark {
+  margin-bottom: 14px;
+}
+
+.theme-swatch {
+  height: 24px;
+  border-radius: 999px;
+}
+
+.theme-variant-label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.theme-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.theme-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.9fr);
+  gap: 18px;
+}
+
+.theme-color-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.theme-color-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.theme-picker {
+  width: 100%;
+  height: 42px;
+}
+
+.theme-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.theme-inline-swatches {
+  display: flex;
+  gap: 4px;
+}
+
+.theme-inline-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 .native-color-picker {
@@ -2718,6 +3993,12 @@ const handleDropZoneClick = (event: Event) => {
   transform-origin: center center;
 }
 
+@media (max-width: 960px) {
+  .theme-editor-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .scale-indicator {
   position: absolute;
   top: 10px;
@@ -2732,10 +4013,4 @@ const handleDropZoneClick = (event: Event) => {
   border: 1px solid rgba(255, 255, 255, 0.3);
 }
 
-/* Add custom style for the switch if needed */
-.custom-switch {
-  /* Adjust display or margins if it doesn't align well in the toolbar */
-  display: inline-flex; /* Helps with alignment in flex containers */
-  align-items: center;
-}
 </style>

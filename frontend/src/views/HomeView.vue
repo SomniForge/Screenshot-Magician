@@ -164,8 +164,20 @@ const timeComparison = [
 
 <style scoped>
 .home-container {
+  --home-bg: #121313;
+  --home-surface: #1e1e1e;
+  --home-text: #f5f7fa;
+  --home-muted: rgba(245, 247, 250, 0.72);
+  --home-border: rgba(255, 255, 255, 0.08);
+  --home-border-strong: rgba(255, 255, 255, 0.14);
+  --home-accent-a: #42a5f5;
+  --home-accent-b: #ab47bc;
   background-color: #121313;
   min-height: 100%;
+  height: 100%;
+  overflow-y: auto;
+  position: relative;
+  color: var(--home-text);
 }
 
 .hero-section {
@@ -189,7 +201,7 @@ const timeComparison = [
 }
 
 .gradient-text {
-  background: linear-gradient(45deg, #42a5f5, #ab47bc);
+  background: linear-gradient(45deg, var(--home-accent-a), var(--home-accent-b));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -197,7 +209,7 @@ const timeComparison = [
 }
 
 .gradient-icon {
-  background: linear-gradient(45deg, #42a5f5, #ab47bc);
+  background: linear-gradient(45deg, var(--home-accent-a), var(--home-accent-b));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -205,19 +217,21 @@ const timeComparison = [
 
 .feature-card {
   transition: all 0.3s ease;
-  background-color: #1E1E1E;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background-color: var(--home-surface);
+  border: 1px solid var(--home-border);
+  color: var(--home-text) !important;
 }
 
 .feature-card.on-hover {
   transform: translateY(-5px);
-  border-color: rgba(255, 255, 255, 0.1);
+  border-color: var(--home-border-strong);
 }
 
 .comparison-table {
-  background-color: #1E1E1E !important;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background-color: var(--home-surface) !important;
+  border: 1px solid var(--home-border);
   border-radius: 8px;
+  color: var(--home-text) !important;
 }
 
 .photoshop-time {
@@ -229,11 +243,31 @@ const timeComparison = [
 }
 
 .total-row {
-  border-top: 2px solid rgba(255, 255, 255, 0.1);
+  border-top: 2px solid var(--home-border-strong);
 }
 
 .total-row td {
   padding-top: 16px !important;
+}
+
+.home-container :deep(.text-medium-emphasis) {
+  color: var(--home-muted) !important;
+}
+
+.home-container :deep(.v-card-title),
+.home-container :deep(.v-card-text),
+.home-container :deep(.v-table),
+.home-container :deep(.v-table th),
+.home-container :deep(.v-table td) {
+  color: var(--home-text) !important;
+}
+
+.home-container :deep(.v-table thead th) {
+  font-weight: 700;
+}
+
+.home-container :deep(.v-table tbody tr:not(:last-child) td) {
+  border-bottom-color: var(--home-border) !important;
 }
 
 @keyframes rotate {

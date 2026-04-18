@@ -12,6 +12,7 @@ const isRail = ref(true);
   <v-navigation-drawer
     :rail="isRail"  
     permanent         
+    color="#131213"
     @mouseenter="isRail = false" 
     @mouseleave="isRail = true"  
     >
@@ -35,6 +36,6 @@ const isRail = ref(true);
 }
 
 .v-list-item {
-  color:aliceblue;
+  color: aliceblue;
 }
 </style>
