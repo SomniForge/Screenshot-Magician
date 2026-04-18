@@ -3,9 +3,41 @@
 import { ref } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.5-beta'; // Incremented version
+const version = 'v2.0.6-beta'; // Incremented version
 
 const changelog = [
+    {
+        version: 'v2.0.6-beta',
+        date: 'APR-18-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added support for multiple independent chatlog layers on a single image',
+                    'Added local browser project saving/loading so full sessions can be reopened later',
+                    'Added inline manual text color overrides with built-in and custom swatches'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved the chat editor workflow with selectable chat layers and project status visibility',
+                    'Refactored chat styling so preview and export use the same inline color and censor data'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed exported image positioning so dragged and zoomed screenshots now match the editor preview',
+                    'Fixed project save failures caused by non-serializable reactive state in browser storage',
+                    'Fixed selection offsets when timestamp stripping is enabled for inline color and censor operations',
+                    'Fixed censor preview spacing so black bar and blur no longer push following text out of place',
+                    'Fixed exported censor rendering so invisible, black bar, and blur now match the on-screen result',
+                    'Fixed Toggle Black Bars changing chat wrapping and layout instead of only drawing bars behind the existing text'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.5-beta', // New version entry
         date: 'APR-18-2025', // Current date

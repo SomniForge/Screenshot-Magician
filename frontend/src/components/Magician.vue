@@ -4,7 +4,6 @@
 import { ref, computed, reactive, onMounted, watch } from 'vue';
 import { type CSSProperties } from 'vue';
 import Cookies from 'js-cookie';
-import html2canvas from 'html2canvas';
 
 const chatlogText = ref('');
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
@@ -31,7 +30,98 @@ interface ParsedLine {
   text: string;
   color?: string;
 }
-const parsedChatLines = ref<ParsedLine[]>([]);
+
+interface ChatTransform {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+// Censor types enum
+enum CensorType {
+  None = 'none',
+  Invisible = 'invisible',
+  BlackBar = 'blackbar',
+  Blur = 'blur'
+}
+
+// Interface for censored regions
+interface CensoredRegion {
+  lineIndex: number;
+  startOffset: number;
+  endOffset: number;
+  type: CensorType;
+}
+
+interface ManualColorRegion {
+  lineIndex: number;
+  startOffset: number;
+  endOffset: number;
+  color: string;
+}
+
+interface ChatOverlay {
+  id: string;
+  name: string;
+  rawText: string;
+  parsedLines: ParsedLine[];
+  transform: ChatTransform;
+  censoredRegions: CensoredRegion[];
+  manualColorRegions: ManualColorRegion[];
+  lineWidth: number;
+}
+
+interface EditorStateSnapshot {
+  characterName: string;
+  chatlogText: string;
+  droppedImageSrc: string | null;
+  dropZoneWidth: number;
+  dropZoneHeight: number;
+  imageTransform: ChatTransform;
+  chatOverlays: ChatOverlay[];
+  activeChatOverlayId: string | null;
+  isImageDraggingEnabled: boolean;
+  isChatDraggingEnabled: boolean;
+  showBlackBars: boolean;
+  selectedText: {
+    lineIndex: number;
+    startOffset: number;
+    endOffset: number;
+    text: string;
+  };
+  stripTimestamps: boolean;
+  chatLineWidth: number;
+}
+
+interface ProjectRecord {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  snapshot: EditorStateSnapshot;
+}
+
+const DEFAULT_CHAT_LINE_WIDTH = 640;
+const PROJECTS_DB_NAME = 'screenshot-magician-projects';
+const PROJECTS_STORE_NAME = 'projects';
+const PROJECTS_DB_VERSION = 1;
+
+const chatOverlays = ref<ChatOverlay[]>([]);
+const activeChatOverlayId = ref<string | null>(null);
+const activeChatOverlay = computed(() =>
+  chatOverlays.value.find((overlay) => overlay.id === activeChatOverlayId.value) ?? null
+);
+
+const projectRecords = ref<Array<Pick<ProjectRecord, 'id' | 'name' | 'createdAt' | 'updatedAt'>>>([]);
+const currentProjectId = ref<string | null>(null);
+const currentProjectName = ref('');
+const showProjectsDialog = ref(false);
+const showSaveProjectDialog = ref(false);
+const pendingProjectName = ref('');
+const isProjectsLoading = ref(false);
+const showColorDialog = ref(false);
+const customColorHex = ref('#ffffff');
+const customColorSwatches = ref<string[]>([]);
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
@@ -42,7 +132,6 @@ const panStartImagePos = reactive({ x: 0, y: 0 });
 
 // --- Chat Manipulation State ---
 const isChatDraggingEnabled = ref(false);
-const chatTransform = reactive({ x: 0, y: 0, scale: 1 });
 const isChatPanning = ref(false);
 const chatPanStart = reactive({ x: 0, y: 0 });
 const chatPanStartPos = reactive({ x: 0, y: 0 });
@@ -53,7 +142,7 @@ const dropzoneScale = ref(1); // Scale factor for the dropzone to fit screen
 const isScaledDown = ref(false); // Flag to track if the dropzone is scaled down
 
 // Add to the script setup section near the other state variables
-const chatLineWidth = ref(640);
+const chatLineWidth = ref(DEFAULT_CHAT_LINE_WIDTH);
 
 // Calculate necessary scale factor to fit dropzone in available viewport
 const calculateDropzoneScale = () => {
@@ -215,6 +304,40 @@ const colorMappings: ColorMapping[] = [
   }
 ];
 
+const defaultColorSwatches = computed(() => {
+  const swatches = new Set<string>([
+    'rgb(255, 255, 255)',
+    'rgb(0, 0, 0)'
+  ]);
+
+  colorMappings.forEach((mapping) => {
+    swatches.add(mapping.color);
+    if (mapping.markerColor) {
+      swatches.add(mapping.markerColor);
+    }
+  });
+
+  return Array.from(swatches);
+});
+
+const saveCustomColorSwatches = () => {
+  Cookies.set('customColorSwatches', JSON.stringify(customColorSwatches.value), { expires: 365 });
+};
+
+const loadCustomColorSwatches = () => {
+  const savedSwatches = Cookies.get('customColorSwatches');
+  if (!savedSwatches) return;
+
+  try {
+    const parsedSwatches = JSON.parse(savedSwatches);
+    if (Array.isArray(parsedSwatches)) {
+      customColorSwatches.value = parsedSwatches.filter((color) => typeof color === 'string');
+    }
+  } catch (error) {
+    console.error('Error loading custom color swatches:', error);
+  }
+};
+
 // Computed style for the drop zone
 const dropZoneStyle = computed(() => {
   // Calculate scale if needed
@@ -233,7 +356,7 @@ const dropZoneStyle = computed(() => {
     overflow: 'hidden',
     cursor: isImageDraggingEnabled.value ? (isPanning.value ? 'grabbing' : 'grab') : 'default',
     transition: 'transform 0.2s ease',
-    border: isScaledDown.value ? '2px solid #42a5f5' : '2px dashed transparent' // Blue border when scaled
+    border: isScaledDown.value ? '2px solid #42a5f5' : 'none'
   };
 });
 
@@ -264,79 +387,494 @@ const imageStyle = computed(() => ({
   transition: isPanning.value ? 'none' : 'transform 0.1s ease-out' // Smooth transition only when not panning
 }));
 
-const clearChatlog = () => {
-  chatlogText.value = '';
-  parsedChatLines.value = []; // Clear parsed lines too
+const createOverlayId = () =>
+  `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const createProjectId = () =>
+  `project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const createDefaultChatTransform = (): ChatTransform => ({
+  x: 0,
+  y: 0,
+  scale: 1
+});
+
+const getChatOverlayName = (rawText: string, overlayIndex: number) => {
+  const firstLine = rawText
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+
+  if (!firstLine) {
+    return `Chatlog ${overlayIndex + 1}`;
+  }
+
+  return firstLine.length > 32 ? `${firstLine.slice(0, 32)}...` : firstLine;
 };
 
-const parseChatlog = () => {
-  const lines = chatlogText.value.split('\n').filter(line => line.trim() !== '');
-  parsedChatLines.value = lines.map((line, index) => {
+const cloneChatOverlay = (overlay: Partial<ChatOverlay>, index: number): ChatOverlay => ({
+  id: overlay.id || createOverlayId(),
+  name: overlay.name || getChatOverlayName(overlay.rawText || '', index),
+  rawText: overlay.rawText || '',
+  parsedLines: Array.isArray(overlay.parsedLines) ? overlay.parsedLines : parseChatText(overlay.rawText || ''),
+  transform: {
+    ...createDefaultChatTransform(),
+    ...(overlay.transform || {})
+  },
+  censoredRegions: Array.isArray(overlay.censoredRegions) ? overlay.censoredRegions : [],
+  manualColorRegions: Array.isArray(overlay.manualColorRegions) ? overlay.manualColorRegions : [],
+  lineWidth: overlay.lineWidth || DEFAULT_CHAT_LINE_WIDTH
+});
+
+const createEditorSnapshot = (): EditorStateSnapshot => ({
+  characterName: characterName.value,
+  chatlogText: chatlogText.value,
+  droppedImageSrc: droppedImageSrc.value,
+  dropZoneWidth: dropZoneWidth.value || 800,
+  dropZoneHeight: dropZoneHeight.value || 600,
+  imageTransform: { ...imageTransform },
+  chatOverlays: chatOverlays.value.map((overlay, index) => cloneChatOverlay(overlay, index)),
+  activeChatOverlayId: activeChatOverlayId.value,
+  isImageDraggingEnabled: isImageDraggingEnabled.value,
+  isChatDraggingEnabled: isChatDraggingEnabled.value,
+  showBlackBars: showBlackBars.value,
+  selectedText: { ...selectedText },
+  stripTimestamps: stripTimestamps.value,
+  chatLineWidth: chatLineWidth.value
+});
+
+const toSerializableSnapshot = (snapshot: EditorStateSnapshot): EditorStateSnapshot =>
+  JSON.parse(JSON.stringify(snapshot)) as EditorStateSnapshot;
+
+const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
+  characterName.value = snapshot.characterName || '';
+  chatlogText.value = snapshot.chatlogText || '';
+  droppedImageSrc.value = snapshot.droppedImageSrc || null;
+  dropZoneWidth.value = snapshot.dropZoneWidth || 800;
+  dropZoneHeight.value = snapshot.dropZoneHeight || 600;
+  Object.assign(imageTransform, snapshot.imageTransform || { x: 0, y: 0, scale: 1 });
+  isImageDraggingEnabled.value = snapshot.isImageDraggingEnabled || false;
+  isChatDraggingEnabled.value = snapshot.isChatDraggingEnabled || false;
+  showBlackBars.value = snapshot.showBlackBars || false;
+  Object.assign(selectedText, snapshot.selectedText || { lineIndex: -1, startOffset: 0, endOffset: 0, text: '' });
+  stripTimestamps.value = snapshot.stripTimestamps || false;
+  chatLineWidth.value = snapshot.chatLineWidth || DEFAULT_CHAT_LINE_WIDTH;
+  chatOverlays.value = Array.isArray(snapshot.chatOverlays)
+    ? snapshot.chatOverlays.map((overlay, index) => cloneChatOverlay(overlay, index))
+    : [];
+  activeChatOverlayId.value = snapshot.activeChatOverlayId || chatOverlays.value[0]?.id || null;
+  syncEditorFromActiveOverlay();
+  renderKey.value++;
+};
+
+const openProjectsDb = () =>
+  new Promise<IDBDatabase>((resolve, reject) => {
+    const request = window.indexedDB.open(PROJECTS_DB_NAME, PROJECTS_DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(PROJECTS_STORE_NAME)) {
+        db.createObjectStore(PROJECTS_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+const getProjectStore = async (mode: IDBTransactionMode) => {
+  const db = await openProjectsDb();
+  const transaction = db.transaction(PROJECTS_STORE_NAME, mode);
+  const store = transaction.objectStore(PROJECTS_STORE_NAME);
+  return { db, transaction, store };
+};
+
+const listStoredProjects = async () =>
+  new Promise<ProjectRecord[]>(async (resolve, reject) => {
+    try {
+      const { db, transaction, store } = await getProjectStore('readonly');
+      const request = store.getAll();
+
+      request.onsuccess = () => {
+        db.close();
+        resolve((request.result as ProjectRecord[]).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+      };
+      request.onerror = () => {
+        db.close();
+        reject(request.error);
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    } catch (error) {
+      reject(error);
+    }
+  });
+
+const saveStoredProject = async (project: ProjectRecord) =>
+  new Promise<void>(async (resolve, reject) => {
+    try {
+      const { db, transaction, store } = await getProjectStore('readwrite');
+      const request = store.put(project);
+
+      request.onsuccess = () => {
+        db.close();
+        resolve();
+      };
+      request.onerror = () => {
+        db.close();
+        reject(request.error);
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    } catch (error) {
+      reject(error);
+    }
+  });
+
+const loadStoredProject = async (projectId: string) =>
+  new Promise<ProjectRecord | undefined>(async (resolve, reject) => {
+    try {
+      const { db, transaction, store } = await getProjectStore('readonly');
+      const request = store.get(projectId);
+
+      request.onsuccess = () => {
+        db.close();
+        resolve(request.result as ProjectRecord | undefined);
+      };
+      request.onerror = () => {
+        db.close();
+        reject(request.error);
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    } catch (error) {
+      reject(error);
+    }
+  });
+
+const deleteStoredProject = async (projectId: string) =>
+  new Promise<void>(async (resolve, reject) => {
+    try {
+      const { db, transaction, store } = await getProjectStore('readwrite');
+      const request = store.delete(projectId);
+
+      request.onsuccess = () => {
+        db.close();
+        resolve();
+      };
+      request.onerror = () => {
+        db.close();
+        reject(request.error);
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    } catch (error) {
+      reject(error);
+    }
+  });
+
+const refreshProjectList = async () => {
+  isProjectsLoading.value = true;
+
+  try {
+    const projects = await listStoredProjects();
+    projectRecords.value = projects.map(({ id, name, createdAt, updatedAt }) => ({ id, name, createdAt, updatedAt }));
+  } catch (error) {
+    console.error('Error loading projects:', error);
+  } finally {
+    isProjectsLoading.value = false;
+  }
+};
+
+const clearChatlog = () => {
+  chatlogText.value = '';
+  selectedText.lineIndex = -1;
+  selectedText.startOffset = 0;
+  selectedText.endOffset = 0;
+  selectedText.text = '';
+};
+
+const parseChatText = (rawText: string) => {
+  const lines = rawText.split('\n').filter(line => line.trim() !== '');
+
+  return lines.map((line, index) => {
     let processedText = line;
-    
-    // Strip timestamps if the option is enabled
+
     if (stripTimestamps.value) {
       processedText = processedText.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
     }
-    
-    let color: string | undefined = undefined;
-    
-    // First check for cellphone messages
-    const cellphonePattern = colorMappings.find(mapping => 
-      mapping.checkPlayerName && mapping.pattern.test(processedText)
-    );
-    
-    if (cellphonePattern && characterName.value) {
-      // If it's the player's message, use white color
-      if (processedText.startsWith(characterName.value)) {
-        color = 'rgb(255, 255, 255)';
-      } else {
-        // Otherwise use yellow for incoming calls
-        color = cellphonePattern.color;
-      }
-    } else {
-      // Check for patterns that should color the entire line
-      const fullLinePattern = colorMappings.find(mapping => 
-        mapping.fullLine && !mapping.checkPlayerName && mapping.pattern.test(processedText)
-      );
 
-      if (fullLinePattern) {
-        color = fullLinePattern.color;
-      } else {
-        // Check for split patterns 
-        const splitPattern = colorMappings.find(mapping => 
-          mapping.splitPattern && mapping.pattern.test(processedText)
-        );
-
-        if (splitPattern && splitPattern.splitPattern && splitPattern.markerColor) {
-          const parts = processedText.split(splitPattern.splitPattern);
-          if (parts.length > 1) {
-            processedText = parts.map((part, i) => {
-              if (splitPattern.splitPattern?.test(part)) {
-                return `<span style="color: ${splitPattern.markerColor}">${part}</span>`;
-              }
-              return `<span style="color: ${splitPattern.color}">${part}</span>`;
-            }).join('');
-            color = 'white'; // Base color doesn't matter as we're using inline styles
-          }
-        } else {
-          // Check other patterns
-          for (const mapping of colorMappings) {
-            if (mapping.pattern.test(processedText)) {
-              color = mapping.color;
-              break;
-            }
-          }
-        }
-      }
-    }
-    
     return {
       id: index,
-      text: processedText,
-      color: color || 'white'
+      text: processedText
     };
   });
+};
+
+const getDisplayedLineText = (line: string) => {
+  if (!stripTimestamps.value) {
+    return line;
+  }
+
+  return line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
+};
+
+const getDisplayedSelectionRange = (line: string, rawStartOffset: number, rawEndOffset: number) => {
+  const displayedLine = getDisplayedLineText(line);
+
+  if (!stripTimestamps.value) {
+    return {
+      displayedLine,
+      startOffset: rawStartOffset,
+      endOffset: rawEndOffset
+    };
+  }
+
+  const timestampMatch = line.match(/^\[\d{2}:\d{2}:\d{2}\]\s*/);
+  const strippedLength = timestampMatch ? timestampMatch[0].length : 0;
+
+  return {
+    displayedLine,
+    startOffset: Math.max(0, rawStartOffset - strippedLength),
+    endOffset: Math.max(0, rawEndOffset - strippedLength)
+  };
+};
+
+const escapeHtml = (text: string) =>
+  text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
+const getAutomaticLineColors = (text: string) => {
+  const colors = Array(text.length).fill('rgb(255, 255, 255)');
+
+  const cellphonePattern = colorMappings.find((mapping) =>
+    mapping.checkPlayerName && mapping.pattern.test(text)
+  );
+
+  if (cellphonePattern && characterName.value) {
+    const color = text.startsWith(characterName.value)
+      ? 'rgb(255, 255, 255)'
+      : cellphonePattern.color;
+    return colors.fill(color);
+  }
+
+  const fullLinePattern = colorMappings.find((mapping) =>
+    mapping.fullLine && !mapping.checkPlayerName && mapping.pattern.test(text)
+  );
+
+  if (fullLinePattern) {
+    return colors.fill(fullLinePattern.color);
+  }
+
+  const splitPattern = colorMappings.find((mapping) =>
+    mapping.splitPattern && mapping.pattern.test(text)
+  );
+
+  if (splitPattern?.splitPattern && splitPattern.markerColor) {
+    colors.fill(splitPattern.color);
+    const flags = splitPattern.splitPattern.flags.includes('g')
+      ? splitPattern.splitPattern.flags
+      : `${splitPattern.splitPattern.flags}g`;
+    const regex = new RegExp(splitPattern.splitPattern.source, flags);
+
+    for (const match of text.matchAll(regex)) {
+      const matchText = match[0];
+      const matchIndex = match.index ?? 0;
+      for (let index = matchIndex; index < matchIndex + matchText.length; index++) {
+        colors[index] = splitPattern.markerColor;
+      }
+    }
+
+    return colors;
+  }
+
+  for (const mapping of colorMappings) {
+    if (mapping.pattern.test(text)) {
+      return colors.fill(mapping.color);
+    }
+  }
+
+  return colors;
+};
+
+const getStyledCharacters = (overlay: ChatOverlay, lineIndex: number, text: string) => {
+  const colors = getAutomaticLineColors(text);
+  const censorTypes = Array<CensorType | undefined>(text.length).fill(undefined);
+
+  overlay.manualColorRegions.forEach((region) => {
+    if (region.lineIndex !== lineIndex) return;
+
+    for (let index = Math.max(0, region.startOffset); index < Math.min(text.length, region.endOffset); index++) {
+      colors[index] = region.color;
+    }
+  });
+
+  overlay.censoredRegions.forEach((region) => {
+    if (region.lineIndex !== lineIndex) return;
+
+    for (let index = Math.max(0, region.startOffset); index < Math.min(text.length, region.endOffset); index++) {
+      censorTypes[index] = region.type;
+    }
+  });
+
+  return text.split('').map((character, index) => ({
+    character,
+    color: colors[index] || 'rgb(255, 255, 255)',
+    censorType: censorTypes[index]
+  }));
+};
+
+const collapseStyledCharacters = (
+  characters: Array<{ character: string; color: string; censorType?: CensorType }>
+) => {
+  if (characters.length === 0) return [];
+
+  const runs: Array<{ text: string; color: string; censorType?: CensorType }> = [];
+  let currentRun = { ...characters[0], text: characters[0].character };
+
+  for (let index = 1; index < characters.length; index++) {
+    const currentCharacter = characters[index];
+
+    if (
+      currentCharacter.color === currentRun.color &&
+      currentCharacter.censorType === currentRun.censorType
+    ) {
+      currentRun.text += currentCharacter.character;
+    } else {
+      runs.push({
+        text: currentRun.text,
+        color: currentRun.color,
+        censorType: currentRun.censorType
+      });
+      currentRun = { ...currentCharacter, text: currentCharacter.character };
+    }
+  }
+
+  runs.push({
+    text: currentRun.text,
+    color: currentRun.color,
+    censorType: currentRun.censorType
+  });
+
+  return runs;
+};
+
+const buildStyledLineHtml = (overlay: ChatOverlay, lineIndex: number, text: string) =>
+  collapseStyledCharacters(getStyledCharacters(overlay, lineIndex, text))
+    .map((run) => {
+      const classNames = [];
+      if (run.censorType === CensorType.Invisible) classNames.push('censored-invisible');
+      if (run.censorType === CensorType.BlackBar) classNames.push('censored-blackbar');
+      if (run.censorType === CensorType.Blur) classNames.push('censored-blur');
+
+      const classAttribute = classNames.length > 0 ? ` class="${classNames.join(' ')}"` : '';
+      return `<span${classAttribute} style="color: ${run.color}">${escapeHtml(run.text)}</span>`;
+    })
+    .join('');
+
+const syncEditorFromActiveOverlay = () => {
+  if (!activeChatOverlay.value) {
+    chatlogText.value = '';
+    chatLineWidth.value = DEFAULT_CHAT_LINE_WIDTH;
+    return;
+  }
+
+  chatlogText.value = activeChatOverlay.value.rawText;
+  chatLineWidth.value = activeChatOverlay.value.lineWidth;
+};
+
+const selectChatOverlay = (overlayId: string | null) => {
+  activeChatOverlayId.value = overlayId;
+  syncEditorFromActiveOverlay();
+  selectedText.lineIndex = -1;
+  selectedText.startOffset = 0;
+  selectedText.endOffset = 0;
+  selectedText.text = '';
+  renderKey.value++;
+};
+
+const startNewChatLayer = () => {
+  activeChatOverlayId.value = null;
+  chatlogText.value = '';
+  chatLineWidth.value = DEFAULT_CHAT_LINE_WIDTH;
+  selectedText.lineIndex = -1;
+  selectedText.startOffset = 0;
+  selectedText.endOffset = 0;
+  selectedText.text = '';
+};
+
+const removeChatOverlay = (overlayId: string) => {
+  const overlayIndex = chatOverlays.value.findIndex((overlay) => overlay.id === overlayId);
+  if (overlayIndex === -1) return;
+
+  chatOverlays.value.splice(overlayIndex, 1);
+
+  if (activeChatOverlayId.value === overlayId) {
+    const nextOverlay = chatOverlays.value[Math.max(0, overlayIndex - 1)] ?? chatOverlays.value[0] ?? null;
+    selectChatOverlay(nextOverlay?.id ?? null);
+  }
+
+  renderKey.value++;
+};
+
+const reparseChatOverlays = () => {
+  chatOverlays.value.forEach((overlay, index) => {
+    overlay.parsedLines = parseChatText(overlay.rawText);
+    overlay.name = getChatOverlayName(overlay.rawText, index);
+  });
+  renderKey.value++;
+};
+
+const parseChatlog = () => {
+  const rawText = chatlogText.value;
+  const parsedLines = parseChatText(rawText);
+
+  if (parsedLines.length === 0) {
+    if (activeChatOverlay.value) {
+      activeChatOverlay.value.rawText = rawText;
+      activeChatOverlay.value.parsedLines = [];
+      activeChatOverlay.value.name = getChatOverlayName(rawText, chatOverlays.value.indexOf(activeChatOverlay.value));
+      activeChatOverlay.value.lineWidth = chatLineWidth.value;
+    }
+    renderKey.value++;
+    return;
+  }
+
+  if (activeChatOverlay.value) {
+    activeChatOverlay.value.rawText = rawText;
+    activeChatOverlay.value.parsedLines = parsedLines;
+    activeChatOverlay.value.lineWidth = chatLineWidth.value;
+    activeChatOverlay.value.name = getChatOverlayName(rawText, chatOverlays.value.indexOf(activeChatOverlay.value));
+  } else {
+    const overlayIndex = chatOverlays.value.length;
+    const newOverlay: ChatOverlay = {
+      id: createOverlayId(),
+      name: getChatOverlayName(rawText, overlayIndex),
+      rawText,
+      parsedLines,
+      transform: createDefaultChatTransform(),
+      censoredRegions: [],
+      manualColorRegions: [],
+      lineWidth: chatLineWidth.value
+    };
+
+    chatOverlays.value.push(newOverlay);
+    activeChatOverlayId.value = newOverlay.id;
+  }
+
+  renderKey.value++;
 };
 
 // --- File Handling Methods ---
@@ -389,6 +927,7 @@ const handleChatFileSelect = async (event: Event) => {
     if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
       try {
         const text = await file.text(); // Read file as text
+        startNewChatLayer();
         chatlogText.value = text; // Set the textarea content
         parseChatlog(); // Automatically parse the imported chat
       } catch (error) {
@@ -501,8 +1040,11 @@ const toggleImageDrag = () => {
 };
 
 // --- Chat Dragging Handlers ---
-const handleChatMouseDown = (event: MouseEvent) => {
-  if (!isChatDraggingEnabled.value || parsedChatLines.value.length === 0) return;
+const handleChatMouseDown = (event: MouseEvent, overlayId: string) => {
+  selectChatOverlay(overlayId);
+
+  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay || overlay.parsedLines.length === 0 || !isChatDraggingEnabled.value) return;
   
   // Don't allow chat dragging if image dragging is active and in progress
   if (isImageDraggingEnabled.value && isPanning.value) {
@@ -515,21 +1057,21 @@ const handleChatMouseDown = (event: MouseEvent) => {
   isChatPanning.value = true;
   chatPanStart.x = event.clientX;
   chatPanStart.y = event.clientY;
-  chatPanStartPos.x = chatTransform.x;
-  chatPanStartPos.y = chatTransform.y;
+  chatPanStartPos.x = overlay.transform.x;
+  chatPanStartPos.y = overlay.transform.y;
   document.body.style.userSelect = 'none';
 };
 
 const handleChatMouseMove = (event: MouseEvent) => {
-  if (!isChatPanning.value) return;
+  if (!isChatPanning.value || !activeChatOverlay.value) return;
   
   // Prevent event from being handled by image drag
   event.stopPropagation();
   
   const deltaX = event.clientX - chatPanStart.x;
   const deltaY = event.clientY - chatPanStart.y;
-  chatTransform.x = chatPanStartPos.x + deltaX;
-  chatTransform.y = chatPanStartPos.y + deltaY;
+  activeChatOverlay.value.transform.x = chatPanStartPos.x + deltaX;
+  activeChatOverlay.value.transform.y = chatPanStartPos.y + deltaY;
 };
 
 const handleChatMouseUpOrLeave = (event?: MouseEvent) => {
@@ -543,17 +1085,21 @@ const handleChatMouseUpOrLeave = (event?: MouseEvent) => {
 };
 
 // --- Chat Zoom Handler ---
-const handleChatWheel = (event: WheelEvent) => {
-  if (!isChatDraggingEnabled.value || parsedChatLines.value.length === 0) return;
+const handleChatWheel = (event: WheelEvent, overlayId: string) => {
+  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay || !isChatDraggingEnabled.value || overlay.parsedLines.length === 0) return;
+
+  selectChatOverlay(overlayId);
   event.preventDefault();
+  event.stopPropagation();
   const scaleAmount = 0.1;
   const minScale = 0.5;
   const maxScale = 3;
 
   if (event.deltaY < 0) {
-    chatTransform.scale = Math.min(maxScale, chatTransform.scale + scaleAmount);
+    overlay.transform.scale = Math.min(maxScale, overlay.transform.scale + scaleAmount);
   } else {
-    chatTransform.scale = Math.max(minScale, chatTransform.scale - scaleAmount);
+    overlay.transform.scale = Math.max(minScale, overlay.transform.scale - scaleAmount);
   }
 };
 
@@ -648,47 +1194,30 @@ const handleResizeMouseUp = () => {
   console.log("Resize complete");
 };
 
-// Compute chat overlay style
-const chatOverlayStyle = computed(() => ({
-  transform: `translate(${chatTransform.x}px, ${chatTransform.y}px) scale(${chatTransform.scale})`,
-  cursor: isChatDraggingEnabled.value ? (isChatPanning.value ? 'grabbing' : 'grab') : 'default',
-  transition: isChatPanning.value ? 'none' : 'transform 0.1s ease-out',
-  pointerEvents: (isChatDraggingEnabled.value ? 'auto' : 'none') as 'auto' | 'none'
-} as const));
-
-// Replace chatLineStyle with a direct rendering approach
-const chatLineStyle = computed(() => (line: ParsedLine, index: number) => {
-  // Hard code basic positioning
-  return {
-    position: 'relative' as const,
-    top: 0,
-    left: 0,
-    marginBottom: '0',
-    padding: 0,
-    boxSizing: 'border-box' as const,
-  };
-});
-
 // Update chat overlay styles
-const chatStyles = computed(() => {
+const getChatStyles = (overlay: ChatOverlay) => {
+  const isActiveOverlay = activeChatOverlayId.value === overlay.id;
+
   return {
     position: 'absolute' as const,
     top: '0',
     left: '0',
-    width: '100%',
+    width: `${overlay.lineWidth}px`,
     height: 'auto',
-    // Force the width to be constrained to enforce wrapping at same break points
-    maxWidth: `${dropZoneWidth.value}px`, // Match the exact dropzone width
+    maxWidth: `${overlay.lineWidth}px`,
     fontFamily: '"Arial Black", Arial, sans-serif',
     fontSize: '12px',
     lineHeight: '16px',
-    transform: `translate(${chatTransform.x}px, ${chatTransform.y}px) scale(${chatTransform.scale})`,
+    transform: `translate(${overlay.transform.x}px, ${overlay.transform.y}px) scale(${overlay.transform.scale})`,
     transformOrigin: 'top left',
-    pointerEvents: (isChatDraggingEnabled.value ? 'auto' : 'none') as 'auto' | 'none',
+    pointerEvents: 'auto' as const,
     wordWrap: 'break-word' as const,
     whiteSpace: 'pre-wrap' as const,
+    cursor: isChatDraggingEnabled.value ? (isActiveOverlay && isChatPanning.value ? 'grabbing' : 'grab') : 'pointer',
+    outline: isActiveOverlay ? '1px dashed rgba(66, 165, 245, 0.9)' : 'none',
+    outlineOffset: '2px',
   };
-});
+};
 
 // Update the saveImage function to ensure 1:1 positioning match with preview
 const saveImage = async () => {
@@ -740,72 +1269,30 @@ const saveImage = async () => {
       offsetY = 0;
     }
 
-    // --- Apply CSS-like transform (translate + scale) with center origin ---
-    // 1. Translate context to the center of the drawing area (where the image is placed by object-fit: contain)
-    ctx.translate(offsetX + drawWidth / 2, offsetY + drawHeight / 2);
-    // 2. Apply scaling relative to the center
-    ctx.scale(imageTransform.scale, imageTransform.scale);
-    // 3. Apply translation relative to the now scaled and centered origin
+    // Match the preview image element exactly:
+    // the image fills the whole drop zone, uses object-fit: contain, and transforms
+    // around the center of the full drop zone rather than the contained image bounds.
+    ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.translate(imageTransform.x, imageTransform.y);
-    // 4. Draw the image centered at the origin (0,0) of the transformed context
-    // The image itself is drawn from its top-left corner (-drawWidth / 2, -drawHeight / 2)
-    // relative to the transformed origin, filling the calculated drawWidth/drawHeight.
-    ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+    ctx.scale(imageTransform.scale, imageTransform.scale);
+    ctx.drawImage(
+      img,
+      offsetX - canvas.width / 2,
+      offsetY - canvas.height / 2,
+      drawWidth,
+      drawHeight
+    );
 
     ctx.restore(); // Restore context after drawing image
 
-    // If there are chat lines, render them
-    if (parsedChatLines.value.length > 0) {
-      ctx.save();
-      
-      // FIXED: Apply chat transform directly without offset
-      // The previous implementation added drop zone position offsets which caused misalignment
-      ctx.translate(chatTransform.x, chatTransform.y);
-      ctx.scale(chatTransform.scale, chatTransform.scale);
+    const visibleChatOverlays = chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0);
 
-      // Set up text rendering to match exactly with the preview
+    if (visibleChatOverlays.length > 0) {
       ctx.font = '700 12px Arial, sans-serif';
       ctx.textBaseline = 'top';
       ctx.textRendering = 'geometricPrecision';
       ctx.letterSpacing = '0px';
-      
-      let currentY = 0;
-      const TEXT_OFFSET_Y = 1; // Consistent with preview
-      const MAX_LINE_CHARS = 80; // Same as preview
 
-      // Helper function to get text color based on content (unchanged)
-      const getTextColor = (text: string): string => {
-        // Check for radio messages first (since they contain asterisks)
-        if (text.includes('[S:') && text.includes('CH:')) return 'rgb(214, 207, 140)';
-        
-        // Check for RP lines (lines starting with *)
-        if (text.startsWith('*')) return 'rgb(194, 163, 218)';
-        
-        // Check for car whispers
-        if (text.includes('(Car)') && text.includes('whispers:')) return 'rgb(255, 255, 0)';
-        
-        // Check for regular whispers
-        if (text.includes('whispers:')) return 'rgb(237, 168, 65)';
-        
-        // Check for cellphone messages - make white if it's the character's message
-        if (text.includes('(cellphone)')) {
-          if (text.startsWith(characterName.value)) {
-            return 'rgb(255, 255, 255)';
-          }
-          return 'rgb(251, 247, 36)';
-        }
-        
-        // Check for megaphone messages
-        if (text.includes('[Megaphone]')) return 'rgb(241, 213, 3)';
-        
-        // Check for money messages
-        if (text.includes('You paid')) return 'rgb(86, 214, 75)';
-        
-        // Default color
-        return 'rgb(255, 255, 255)';
-      };
-
-      // Helper function to draw black bar (unchanged)
       const drawBlackBar = (y: number, width: number) => {
         if (showBlackBars.value) {
           ctx.fillStyle = '#000000';
@@ -813,230 +1300,153 @@ const saveImage = async () => {
         }
       };
 
-      // Helper functions for text drawing (unchanged)
-      const drawTextWithOutline = (text: string, x: number, y: number, color: string, censorType?: CensorType) => {
-        const width = ctx.measureText(text).width;
-        const TEXT_OFFSET_Y = 1; // Moved declaration here
-
-        // If black bars are enabled, draw the background first
-        if (showBlackBars.value) {
-          // Adjust bar slightly for better coverage around text, matching shadow spread
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(x - 2, y, width + 4, 16);
-        }
-
-        if (censorType) {
-          // Define tempCanvas and context locally for blur effect
-          const tempCanvas = document.createElement('canvas');
-          const tempCtx = tempCanvas.getContext('2d');
-          if (!tempCtx) return; // Guard against null context
-
-          // Set temp canvas size slightly larger to accommodate blur filter
-          tempCanvas.width = width + 20; // Add padding for blur
-          tempCanvas.height = 16 + 20;
-
-          // Draw the text onto the temporary canvas (offset to center it)
-          tempCtx.font = ctx.font;
-          tempCtx.fillStyle = color;
-          tempCtx.fillText(text, 10, 10 + TEXT_OFFSET_Y); // Draw text with offset
-
-          // Apply blur filter to the temporary canvas
-          tempCtx.globalCompositeOperation = 'source-in'; // Keep original text shape
-          tempCtx.filter = 'blur(4px)';
-          tempCtx.fillStyle = 'black'; // Or use original color if preferred
-          tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-          tempCtx.filter = 'none'; // Reset filter
-          tempCtx.globalCompositeOperation = 'source-over'; // Reset composite operation
-
-          // Draw the blurred result back to main canvas
-          // Adjust draw position to account for the padding added to tempCanvas
-          ctx.drawImage(tempCanvas, x - 10, y - 10);
-          return; // Make sure to return after drawing blur
-        }
-
-        // Normal text rendering - mimic CSS text-shadow using multiple fillText calls
+      const drawStandardText = (
+        targetCtx: CanvasRenderingContext2D,
+        text: string,
+        x: number,
+        y: number,
+        color: string
+      ) => {
+        const textOffsetY = 1;
         const shadowOffsets = [
           [-1, -1], [-1, 0], [-1, 1],
           [0, -1],           [0, 1],
           [1, -1], [1, 0], [1, 1]
         ];
-        ctx.fillStyle = '#000000'; // Shadow color
+
+        targetCtx.fillStyle = '#000000';
         shadowOffsets.forEach(([dx, dy]) => {
-          // Apply the same TEXT_OFFSET_Y to shadows as well for consistency
-          ctx.fillText(text, x + dx, y + TEXT_OFFSET_Y + dy);
+          targetCtx.fillText(text, x + dx, y + textOffsetY + dy);
         });
 
-        // Draw the main text on top
-        ctx.fillStyle = color;
-        ctx.fillText(text, x, y + TEXT_OFFSET_Y);
+        targetCtx.fillStyle = color;
+        targetCtx.fillText(text, x, y + textOffsetY);
       };
 
-      // Other helper functions (unchanged)
-      const getCensorType = (lineIndex: number, startPos: number, length: number): CensorType | undefined => {
-        return censoredRegions.value.find(r => 
-          r.lineIndex === lineIndex &&
-          ((startPos >= r.startOffset && startPos < r.endOffset) || // Start point is within region
-           (startPos + length > r.startOffset && startPos + length <= r.endOffset) || // End point is within region
-           (startPos <= r.startOffset && startPos + length >= r.endOffset)) // Region is completely contained
-        )?.type;
-      };
+      const drawTextWithOutline = (text: string, x: number, y: number, color: string, censorType?: CensorType) => {
+        const width = ctx.measureText(text).width;
 
-      const drawSpecialLine = (text: string, x: number, y: number, lineIndex: number) => {
-        if (text.includes('[!]')) {
-          // Split the text around [!]
-          const parts = text.split(/(\[!\])/);
-          let currentX = x;
-          let partOffset = 0;
-          
-          for (const part of parts) {
-            const width = ctx.measureText(part).width;
-            const censorType = getCensorType(lineIndex, partOffset, part.length);
-            if (part === '[!]') {
-              drawTextWithOutline(part, currentX, y, 'rgb(255, 0, 195)', censorType);
-            } else {
-              drawTextWithOutline(part, currentX, y, 'rgb(255, 255, 255)', censorType);
-            }
-            currentX += width;
-            partOffset += part.length;
-          }
-          return true;
+        if (showBlackBars.value) {
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(x - 2, y, width + 4, 16);
         }
-        
-        if (text.includes('[Character kill]')) {
-          // Split the text around [Character kill]
-          const parts = text.split(/(\[Character kill\])/);
-          let currentX = x;
-          let partOffset = 0;
-          
-          for (const part of parts) {
-            const width = ctx.measureText(part).width;
-            const censorType = getCensorType(lineIndex, partOffset, part.length);
-            if (part === '[Character kill]') {
-              drawTextWithOutline(part, currentX, y, 'rgb(56, 150, 243)', censorType);
-            } else {
-              drawTextWithOutline(part, currentX, y, 'rgb(240, 0, 0)', censorType);
-            }
-            currentX += width;
-            partOffset += part.length;
-          }
-          return true;
+
+        if (censorType === CensorType.Invisible) {
+          return;
         }
-        
-        return false;
+
+        if (censorType === CensorType.BlackBar) {
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(x, y, width, 16);
+          return;
+        }
+
+        if (censorType === CensorType.Blur) {
+          const tempCanvas = document.createElement('canvas');
+          const tempCtx = tempCanvas.getContext('2d');
+          if (!tempCtx) return;
+
+          tempCanvas.width = width + 20;
+          tempCanvas.height = 16 + 20;
+
+          tempCtx.font = ctx.font;
+          tempCtx.textBaseline = ctx.textBaseline;
+          tempCtx.textRendering = ctx.textRendering;
+
+          drawStandardText(tempCtx, text, 10, 10, color);
+
+          ctx.save();
+          ctx.filter = 'blur(4px)';
+          ctx.drawImage(tempCanvas, x - 10, y - 10);
+          ctx.restore();
+          return;
+        }
+
+        drawStandardText(ctx, text, x, y, color);
       };
 
-      const drawTextSegment = async (text: string, xPos: number, yPos: number, color: string, lineStartPos: number, lineIndex: number) => {
-        // Split text into censored and uncensored segments
+      const measureCharacters = (characters: Array<{ character: string }>) =>
+        ctx.measureText(characters.map((character) => character.character).join('')).width;
+
+      const drawCharacterRun = (
+        characters: Array<{ character: string; color: string; censorType?: CensorType }>,
+        xPos: number,
+        yPos: number
+      ) => {
         let currentX = xPos;
-        let remainingText = text;
-        let currentOffset = lineStartPos;
-        
-        while (remainingText.length > 0) {
-          // Find the next censored region that intersects with our current position
-          const censorRegion = censoredRegions.value.find(r => 
-            r.lineIndex === lineIndex &&
-            r.startOffset <= currentOffset + remainingText.length &&
-            r.endOffset > currentOffset
-          );
 
-          if (!censorRegion) {
-            // No more censoring in this segment, draw the rest normally
-            await drawTextWithOutline(remainingText, currentX, yPos, color);
-            break;
-          }
-
-          // Draw uncensored portion before the censored region
-          const uncensoredLength = Math.max(0, censorRegion.startOffset - currentOffset);
-          if (uncensoredLength > 0) {
-            const uncensoredText = remainingText.substring(0, uncensoredLength);
-            await drawTextWithOutline(uncensoredText, currentX, yPos, color);
-            currentX += ctx.measureText(uncensoredText).width;
-            remainingText = remainingText.substring(uncensoredLength);
-            currentOffset += uncensoredLength;
-          }
-
-          // Draw censored portion
-          const censorLength = Math.min(
-            remainingText.length,
-            censorRegion.endOffset - currentOffset
-          );
-          const censoredText = remainingText.substring(0, censorLength);
-          await drawTextWithOutline(censoredText, currentX, yPos, color, censorRegion.type);
-          currentX += ctx.measureText(censoredText).width;
-          remainingText = remainingText.substring(censorLength);
-          currentOffset += censorLength;
-        }
+        collapseStyledCharacters(characters).forEach((run) => {
+          drawTextWithOutline(run.text, currentX, yPos, run.color, run.censorType);
+          currentX += ctx.measureText(run.text).width;
+        });
       };
 
-      // Process each line using width-based wrapping to match CSS behavior
-      let lineIndex = 0;
-      // FIXED: Use the explicit width from the CSS rule (.chat-line { width: 640px; }) 
-      // minus horizontal padding (4px each side) for accurate wrapping.
-      const maxTextWidth = chatLineWidth.value - 8; 
+      for (const overlay of visibleChatOverlays) {
+        ctx.save();
+        ctx.translate(overlay.transform.x, overlay.transform.y);
+        ctx.scale(overlay.transform.scale, overlay.transform.scale);
 
-      for (const line of parsedChatLines.value) {
-        // Get the raw text content, ensuring HTML entities are decoded for measurement
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(line.text, 'text/html');
-        const textContent = doc.body ? doc.body.textContent || '' : line.text; // Use fallback
+        let currentY = 0;
+        const maxTextWidth = overlay.lineWidth - 8;
 
-        // Get the color for this line (using original logic)
-        const textColor = getTextColor(textContent);
+        for (let lineIndex = 0; lineIndex < overlay.parsedLines.length; lineIndex++) {
+          const line = overlay.parsedLines[lineIndex];
+          const styledCharacters = getStyledCharacters(overlay, lineIndex, line.text);
+          let remainingCharacters = [...styledCharacters];
 
-        // --- Width-based wrapping logic ---
-        const words = textContent.split(' ');
-        let currentLineText = '';
-        let lineStartPosition = 0; // Track character offset within the original line for censoring
-
-        for (let i = 0; i < words.length; i++) {
-          const word = words[i];
-          // Build the potential next line text (current + space + new word)
-          const testLine = currentLineText ? currentLineText + ' ' + word : word;
-          const metrics = ctx.measureText(testLine);
-
-          // Check if adding the next word exceeds the max width
-          if (metrics.width > maxTextWidth && currentLineText) {
-            // The current line is full (without the new word). Draw it.
-            const currentLineWidth = ctx.measureText(currentLineText).width;
-            drawBlackBar(currentY, currentLineWidth); // Draw bar based on measured width
-
-            // Draw the text segment, handling special lines and censoring
-            if (!drawSpecialLine(currentLineText, 4, currentY, lineIndex)) {
-              await drawTextSegment(currentLineText, 4, currentY, textColor, lineStartPosition, lineIndex);
+          while (remainingCharacters.length > 0) {
+            if (measureCharacters(remainingCharacters) <= maxTextWidth) {
+              const currentLineWidth = measureCharacters(remainingCharacters);
+              drawBlackBar(currentY, currentLineWidth);
+              drawCharacterRun(remainingCharacters, 4, currentY);
+              currentY += 16;
+              remainingCharacters = [];
+              continue;
             }
 
-            // Move to the next line position on the canvas
-            currentY += 16; // Increment Y position based on line height
+            let breakIndex = 0;
+            let lastSpaceIndex = -1;
 
-            // Update the starting character position for the next segment
-            // Length of the drawn line + 1 for the space character that caused the wrap
-            lineStartPosition += currentLineText.length + 1;
+            for (let index = 0; index < remainingCharacters.length; index++) {
+              const testCharacters = remainingCharacters.slice(0, index + 1);
+              if (measureCharacters(testCharacters) > maxTextWidth) {
+                breakIndex = lastSpaceIndex > 0 ? lastSpaceIndex : index;
+                break;
+              }
 
-            // Start the new line with the word that didn't fit
-            currentLineText = word;
+              if (remainingCharacters[index].character === ' ') {
+                lastSpaceIndex = index;
+              }
+            }
 
-          } else {
-            // The word fits, add it to the current line
-            currentLineText = testLine;
+            if (breakIndex === 0) {
+              breakIndex = Math.max(1, remainingCharacters.length - 1);
+            }
+
+            let lineCharacters = remainingCharacters.slice(0, breakIndex);
+            remainingCharacters = remainingCharacters.slice(
+              remainingCharacters[breakIndex]?.character === ' ' ? breakIndex + 1 : breakIndex
+            );
+
+            while (lineCharacters[lineCharacters.length - 1]?.character === ' ') {
+              lineCharacters = lineCharacters.slice(0, -1);
+            }
+
+            if (lineCharacters.length === 0) {
+              lineCharacters = remainingCharacters.slice(0, 1);
+              remainingCharacters = remainingCharacters.slice(1);
+            }
+
+            const currentLineWidth = measureCharacters(lineCharacters);
+            drawBlackBar(currentY, currentLineWidth);
+            drawCharacterRun(lineCharacters, 4, currentY);
+            currentY += 16;
           }
         }
 
-        // After the loop, draw any remaining text in currentLineText
-        if (currentLineText) {
-          const currentLineWidth = ctx.measureText(currentLineText).width;
-          drawBlackBar(currentY, currentLineWidth);
-          if (!drawSpecialLine(currentLineText, 4, currentY, lineIndex)) {
-            await drawTextSegment(currentLineText, 4, currentY, textColor, lineStartPosition, lineIndex);
-          }
-          currentY += 16; // Increment Y for the last line
-        }
-        // --- End width-based wrapping logic ---
-
-        lineIndex++; // Move to the next original line index (for censoring mapping)
+        ctx.restore();
       }
-
-      ctx.restore(); // Restore context after drawing all chat
-    } // End if (parsedChatLines.value.length > 0)
+    }
 
     // Convert to blob and save
     canvas.toBlob((blob) => {
@@ -1072,21 +1482,19 @@ const resetSession = () => {
   
   // Reset chat
   chatlogText.value = '';
-  parsedChatLines.value = [];
+  chatOverlays.value = [];
+  activeChatOverlayId.value = null;
+  currentProjectId.value = null;
+  currentProjectName.value = '';
   
   // Reset drop zone dimensions to defaults
   dropZoneWidth.value = 800;
   dropZoneHeight.value = 600;
   
-  // Reset chat transform
-  chatTransform.x = 0;
-  chatTransform.y = 0;
-  chatTransform.scale = 1;
   isChatDraggingEnabled.value = false;
   isChatPanning.value = false;
 
   // Reset censoring data
-  censoredRegions.value = [];
   selectedText.lineIndex = -1;
   selectedText.startOffset = 0;
   selectedText.endOffset = 0;
@@ -1105,24 +1513,6 @@ const toggleBlackBars = () => {
   showBlackBars.value = !showBlackBars.value;
 };
 
-// Censor types enum
-enum CensorType {
-  None = 'none',
-  Invisible = 'invisible',
-  BlackBar = 'blackbar',
-  Blur = 'blur'
-}
-
-// Interface for censored regions
-interface CensoredRegion {
-  lineIndex: number;
-  startOffset: number;
-  endOffset: number;
-  type: CensorType;
-}
-
-// State for censored regions
-const censoredRegions = ref<CensoredRegion[]>([]);
 const selectedText = reactive({
   lineIndex: -1,
   startOffset: 0,
@@ -1135,12 +1525,12 @@ const renderKey = ref(0);
 
 // Update cycleCensorType to trigger re-render
 const cycleCensorType = () => {
-  if (selectedText.lineIndex === -1) return;
+  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
 
   console.log('Applying censoring:', selectedText);
 
   // Find existing censor for this region
-  const existingIndex = censoredRegions.value.findIndex(
+  const existingIndex = activeChatOverlay.value.censoredRegions.findIndex(
     region => region.lineIndex === selectedText.lineIndex &&
              region.startOffset === selectedText.startOffset &&
              region.endOffset === selectedText.endOffset
@@ -1149,14 +1539,14 @@ const cycleCensorType = () => {
   if (existingIndex === -1) {
     // Add new censor starting with Invisible
     console.log('Adding new censor region');
-    censoredRegions.value.push({
+    activeChatOverlay.value.censoredRegions.push({
       lineIndex: selectedText.lineIndex,
       startOffset: selectedText.startOffset,
       endOffset: selectedText.endOffset,
       type: CensorType.Invisible
     });
   } else {
-    const current = censoredRegions.value[existingIndex];
+    const current = activeChatOverlay.value.censoredRegions[existingIndex];
     console.log('Cycling existing censor:', current.type);
     switch (current.type) {
       case CensorType.Invisible:
@@ -1167,63 +1557,66 @@ const cycleCensorType = () => {
         break;
       case CensorType.Blur:
         // Remove censoring
-        censoredRegions.value.splice(existingIndex, 1);
+        activeChatOverlay.value.censoredRegions.splice(existingIndex, 1);
         break;
     }
   }
 
   // Force re-render
   renderKey.value++;
-  console.log('Updated censor regions:', censoredRegions.value);
+  console.log('Updated censor regions:', activeChatOverlay.value.censoredRegions);
 };
 
-// Update applyCensoring to handle partial text censoring
-const applyCensoring = (text: string, lineIndex: number) => {
-  const regions = censoredRegions.value
-    .filter(region => region.lineIndex === lineIndex)
-    .sort((a, b) => a.startOffset - b.startOffset);
+const openColorDialog = () => {
+  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
+  showColorDialog.value = true;
+};
 
-  console.log(`Applying censoring to line ${lineIndex}, found ${regions.length} regions`);
+const applyManualColorOverride = (color: string) => {
+  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
 
-  if (regions.length === 0) return text;
+  const existingIndex = activeChatOverlay.value.manualColorRegions.findIndex((region) =>
+    region.lineIndex === selectedText.lineIndex &&
+    region.startOffset === selectedText.startOffset &&
+    region.endOffset === selectedText.endOffset
+  );
 
-  let result = '';
-  let lastIndex = 0;
-
-  for (const region of regions) {
-    // Add uncensored text before this region
-    result += text.slice(lastIndex, region.startOffset);
-    
-    // Add censored text
-    const censoredText = text.slice(region.startOffset, region.endOffset);
-    console.log('Censoring text:', censoredText, 'with type:', region.type);
-    
-    // Ensure the text is properly escaped for HTML
-    const escapedText = censoredText
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-    
-    switch (region.type) {
-      case CensorType.Invisible:
-        result += `<span class="censored-invisible">${escapedText}</span>`;
-        break;
-      case CensorType.BlackBar:
-        result += `<span class="censored-blackbar">${escapedText}</span>`;
-        break;
-      case CensorType.Blur:
-        result += `<span class="censored-blur">${escapedText}</span>`;
-        break;
-    }
-    
-    lastIndex = region.endOffset;
+  if (existingIndex === -1) {
+    activeChatOverlay.value.manualColorRegions.push({
+      lineIndex: selectedText.lineIndex,
+      startOffset: selectedText.startOffset,
+      endOffset: selectedText.endOffset,
+      color
+    });
+  } else {
+    activeChatOverlay.value.manualColorRegions[existingIndex].color = color;
   }
 
-  // Add remaining uncensored text
-  result += text.slice(lastIndex);
-  return result;
+  showColorDialog.value = false;
+  renderKey.value++;
+};
+
+const removeManualColorOverride = () => {
+  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
+
+  activeChatOverlay.value.manualColorRegions = activeChatOverlay.value.manualColorRegions.filter((region) =>
+    !(
+      region.lineIndex === selectedText.lineIndex &&
+      region.startOffset < selectedText.endOffset &&
+      region.endOffset > selectedText.startOffset
+    )
+  );
+
+  showColorDialog.value = false;
+  renderKey.value++;
+};
+
+const addCustomColorSwatch = () => {
+  const normalizedColor = customColorHex.value.trim().toLowerCase();
+  if (!normalizedColor || customColorSwatches.value.includes(normalizedColor)) return;
+
+  customColorSwatches.value.push(normalizedColor);
+  saveCustomColorSwatches();
 };
 
 // Update handleTextSelection to work with textarea
@@ -1256,9 +1649,13 @@ const handleTextSelection = () => {
       const selectionStart = textarea.selectionStart;
       if (selectionStart >= lineStart && selectionStart < lineEnd) {
         console.log('Found selection in line:', i, lines[i]);
+        const rawStartOffset = selectionStart - lineStart;
+        const rawEndOffset = textarea.selectionEnd - lineStart;
+        const displayedSelection = getDisplayedSelectionRange(lines[i], rawStartOffset, rawEndOffset);
+
         selectedText.lineIndex = i;
-        selectedText.startOffset = selectionStart - lineStart;
-        selectedText.endOffset = textarea.selectionEnd - lineStart;
+        selectedText.startOffset = Math.min(displayedSelection.startOffset, displayedSelection.displayedLine.length);
+        selectedText.endOffset = Math.min(displayedSelection.endOffset, displayedSelection.displayedLine.length);
         selectedText.text = selectedValue;
         break;
       }
@@ -1272,50 +1669,10 @@ const handleTextSelection = () => {
   }
 };
 
-// Helper function to strip HTML and extract text content
-const stripHtml = (html: string): string => {
-  const temp = document.createElement('div');
-  temp.innerHTML = html;
-  return temp.textContent || temp.innerText || '';
-};
-
-// Helper function to break text into lines
-const breakTextIntoLines = (text: string, ctx: CanvasRenderingContext2D, maxWidth: number): string[] => {
-  const words = text.split(' ');
-  const lines: string[] = [];
-  let currentLine = words[0];
-
-  for (let i = 1; i < words.length; i++) {
-    const word = words[i];
-    const width = ctx.measureText(currentLine + ' ' + word).width;
-    if (width < maxWidth) {
-      currentLine += ' ' + word;
-    } else {
-      lines.push(currentLine);
-      currentLine = word;
-    }
-  }
-  lines.push(currentLine);
-  return lines;
-};
-
 // Save editor state to cookie
 const saveEditorState = () => {
-  const state = {
-    characterName: characterName.value,
-    chatlogText: chatlogText.value,
-    dropZoneWidth: dropZoneWidth.value,
-    dropZoneHeight: dropZoneHeight.value,
-    imageTransform: { ...imageTransform },
-    chatTransform: { ...chatTransform },
-    isImageDraggingEnabled: isImageDraggingEnabled.value,
-    isChatDraggingEnabled: isChatDraggingEnabled.value,
-    showBlackBars: showBlackBars.value,
-    censoredRegions: censoredRegions.value,
-    selectedText: { ...selectedText },
-    stripTimestamps: stripTimestamps.value,
-    chatLineWidth: chatLineWidth.value
-  };
+  const state = toSerializableSnapshot(createEditorSnapshot());
+  delete (state as Partial<EditorStateSnapshot>).droppedImageSrc;
   Cookies.set('editorState', JSON.stringify(state), { expires: 365 });
 };
 
@@ -1325,24 +1682,30 @@ const loadEditorState = () => {
   if (savedState) {
     try {
       const state = JSON.parse(savedState);
-      characterName.value = state.characterName || '';
-      chatlogText.value = state.chatlogText || '';
-      dropZoneWidth.value = state.dropZoneWidth || 800;
-      dropZoneHeight.value = state.dropZoneHeight || 600;
-      Object.assign(imageTransform, state.imageTransform || { x: 0, y: 0, scale: 1 });
-      Object.assign(chatTransform, state.chatTransform || { x: 0, y: 0, scale: 1 });
-      isImageDraggingEnabled.value = state.isImageDraggingEnabled || false;
-      isChatDraggingEnabled.value = state.isChatDraggingEnabled || false;
-      showBlackBars.value = state.showBlackBars || false;
-      censoredRegions.value = state.censoredRegions || [];
-      Object.assign(selectedText, state.selectedText || { lineIndex: -1, startOffset: 0, endOffset: 0, text: '' });
-      stripTimestamps.value = state.stripTimestamps || false; // Load the new option
-      chatLineWidth.value = state.chatLineWidth || 640;
-      
-      // If there's chat text, parse it
-      if (chatlogText.value) {
-        parseChatlog();
+      if (!Array.isArray(state.chatOverlays) && state.chatlogText) {
+        const migratedOverlay: ChatOverlay = {
+          id: createOverlayId(),
+          name: getChatOverlayName(state.chatlogText, 0),
+          rawText: state.chatlogText,
+          parsedLines: parseChatText(state.chatlogText),
+          transform: {
+            ...createDefaultChatTransform(),
+            ...(state.chatTransform || {})
+          },
+          censoredRegions: Array.isArray(state.censoredRegions) ? state.censoredRegions : [],
+          manualColorRegions: [],
+          lineWidth: state.chatLineWidth || DEFAULT_CHAT_LINE_WIDTH
+        };
+
+        applyEditorSnapshot({
+          ...state,
+          chatOverlays: [migratedOverlay],
+          activeChatOverlayId: migratedOverlay.id
+        });
+        return;
       }
+
+      applyEditorSnapshot(state);
     } catch (error) {
       console.error('Error loading editor state:', error);
     }
@@ -1373,11 +1736,11 @@ watch([
   dropZoneWidth,
   dropZoneHeight,
   () => ({ ...imageTransform }),
-  () => ({ ...chatTransform }),
+  chatOverlays,
+  activeChatOverlayId,
   isImageDraggingEnabled,
   isChatDraggingEnabled,
   showBlackBars,
-  censoredRegions,
   () => ({ ...selectedText }),
   stripTimestamps,
   chatLineWidth
@@ -1388,7 +1751,9 @@ watch([
 // Load saved state when component mounts
 onMounted(() => {
   loadCharacterName();
+  loadCustomColorSwatches();
   loadEditorState();
+  refreshProjectList();
   
   // Make sure layout is initialized correctly
   initializeLayoutValues();
@@ -1403,6 +1768,88 @@ onMounted(() => {
     });
   }, 100);
 });
+
+watch(chatLineWidth, (newValue) => {
+  if (!activeChatOverlay.value) return;
+  activeChatOverlay.value.lineWidth = newValue;
+  renderKey.value++;
+});
+
+const openProjectsManager = async () => {
+  showProjectsDialog.value = true;
+  await refreshProjectList();
+};
+
+const promptSaveProject = () => {
+  pendingProjectName.value = currentProjectName.value || `Project ${projectRecords.value.length + 1}`;
+  showSaveProjectDialog.value = true;
+};
+
+const saveProject = async (forceNewProject = false) => {
+  const trimmedName = pendingProjectName.value.trim();
+  if (!trimmedName) return;
+
+  const now = new Date().toISOString();
+  const projectId = forceNewProject || !currentProjectId.value ? createProjectId() : currentProjectId.value;
+  const existingCreatedAt = forceNewProject || !currentProjectId.value
+    ? now
+    : projectRecords.value.find((project) => project.id === currentProjectId.value)?.createdAt || now;
+
+  const projectRecord: ProjectRecord = {
+    id: projectId,
+    name: trimmedName,
+    createdAt: existingCreatedAt,
+    updatedAt: now,
+    snapshot: toSerializableSnapshot(createEditorSnapshot())
+  };
+
+  try {
+    await saveStoredProject(projectRecord);
+    currentProjectId.value = projectRecord.id;
+    currentProjectName.value = projectRecord.name;
+    showSaveProjectDialog.value = false;
+    await refreshProjectList();
+  } catch (error) {
+    console.error('Error saving project:', error);
+  }
+};
+
+const loadProject = async (projectId: string) => {
+  try {
+    const project = await loadStoredProject(projectId);
+    if (!project) return;
+
+    applyEditorSnapshot(project.snapshot);
+    currentProjectId.value = project.id;
+    currentProjectName.value = project.name;
+    showProjectsDialog.value = false;
+  } catch (error) {
+    console.error('Error loading project:', error);
+  }
+};
+
+const saveCurrentProject = async () => {
+  if (!currentProjectId.value) {
+    promptSaveProject();
+    return;
+  }
+
+  pendingProjectName.value = currentProjectName.value;
+  await saveProject(false);
+};
+
+const deleteProject = async (projectId: string) => {
+  try {
+    await deleteStoredProject(projectId);
+    if (currentProjectId.value === projectId) {
+      currentProjectId.value = null;
+      currentProjectName.value = '';
+    }
+    await refreshProjectList();
+  } catch (error) {
+    console.error('Error deleting project:', error);
+  }
+};
 
 // Add this new method to handle the click on drop zone
 const handleDropZoneClick = (event: Event) => {
@@ -1431,6 +1878,16 @@ const handleDropZoneClick = (event: Event) => {
             <v-btn v-bind="props" icon="mdi-message-plus-outline" @click="triggerChatFileInput"></v-btn>
           </template>
         </v-tooltip>
+        <v-tooltip text="Open Projects" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn v-bind="props" icon="mdi-folder-open-outline" @click="openProjectsManager"></v-btn>
+          </template>
+        </v-tooltip>
+        <v-tooltip text="Save Project" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn v-bind="props" icon="mdi-content-save-cog-outline" @click="saveCurrentProject"></v-btn>
+          </template>
+        </v-tooltip>
         <v-tooltip text="Strip Timestamps from Chatlog" location="bottom">
           <template v-slot:activator="{ props }">
             <v-switch
@@ -1440,7 +1897,7 @@ const handleDropZoneClick = (event: Event) => {
               density="compact"
               hide-details
               class="ms-2 me-1 custom-switch"
-              @change="parseChatlog" 
+              @change="reparseChatOverlays" 
             ></v-switch>
           </template>
         </v-tooltip>
@@ -1463,7 +1920,7 @@ const handleDropZoneClick = (event: Event) => {
           flat
           style="max-width: 300px; min-width: 250px;"
           class="mx-1"
-          @input="parseChatlog"
+          @input="reparseChatOverlays"
           prepend-inner-icon="mdi-account"
         ></v-text-field>
       </div>
@@ -1572,6 +2029,16 @@ const handleDropZoneClick = (event: Event) => {
             ></v-btn>
           </template>
         </v-tooltip>
+        <v-tooltip text="Color Selection" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn
+              v-bind="props"
+              icon="mdi-palette-outline"
+              @click="openColorDialog"
+              :disabled="selectedText.lineIndex === -1"
+            ></v-btn>
+          </template>
+        </v-tooltip>
         <v-tooltip text="Save Image" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn 
@@ -1584,21 +2051,6 @@ const handleDropZoneClick = (event: Event) => {
         </v-tooltip>
       </div>
     </v-toolbar>
-
-    <!-- Added Alert Banner for Known Issue -->
-    <div class="alert-banner-container">
-      <v-alert
-        type="error"
-        variant="tonal"
-        prominent
-        closable
-        icon="mdi-alert"
-        class="ma-0"
-        border="start"
-      >
-        <strong>Known Issue: We are aware of inconsistencies affecting some exported images and are actively working on a fix. Thank you for your patience.</strong>
-      </v-alert>
-    </div>
 
     <!-- New Session Confirmation Dialog -->
     <v-dialog v-model="showNewSessionDialog" max-width="400">
@@ -1625,6 +2077,155 @@ const handleDropZoneClick = (event: Event) => {
           >
             Reset Everything
           </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="showSaveProjectDialog" max-width="520">
+      <v-card>
+        <v-card-title class="text-h6">
+          {{ currentProjectId ? 'Save Project' : 'Create Project' }}
+        </v-card-title>
+        <v-card-text>
+          <v-text-field
+            v-model="pendingProjectName"
+            label="Project Name"
+            variant="outlined"
+            density="comfortable"
+            hide-details
+            autofocus
+          ></v-text-field>
+          <div class="text-caption text-medium-emphasis mt-3">
+            Projects are stored locally in this browser on this machine, including the current image and all chat layers.
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showSaveProjectDialog = false">Cancel</v-btn>
+          <v-btn variant="text" color="secondary" @click="saveProject(true)">Save As New</v-btn>
+          <v-btn color="primary" variant="text" @click="saveProject(false)">
+            {{ currentProjectId ? 'Save' : 'Create' }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="showColorDialog" max-width="620">
+      <v-card>
+        <v-card-title class="text-h6">Color Selection</v-card-title>
+        <v-card-text>
+          <div class="text-body-2 mb-3">
+            Apply a manual color override to the currently selected text in the chat editor.
+          </div>
+          <div class="text-subtitle-2 mb-2">Default Swatches</div>
+          <div class="swatch-grid mb-4">
+            <button
+              v-for="color in defaultColorSwatches"
+              :key="color"
+              type="button"
+              class="color-swatch"
+              :style="{ backgroundColor: color }"
+              :title="color"
+              @click="applyManualColorOverride(color)"
+            ></button>
+          </div>
+
+          <div class="text-subtitle-2 mb-2">Custom Swatches</div>
+          <div v-if="customColorSwatches.length > 0" class="swatch-grid mb-4">
+            <button
+              v-for="color in customColorSwatches"
+              :key="color"
+              type="button"
+              class="color-swatch"
+              :style="{ backgroundColor: color }"
+              :title="color"
+              @click="applyManualColorOverride(color)"
+            ></button>
+          </div>
+          <div v-else class="text-caption text-medium-emphasis mb-4">
+            No custom swatches saved yet.
+          </div>
+
+          <div class="d-flex align-center ga-3">
+            <input v-model="customColorHex" type="color" class="native-color-picker" />
+            <v-text-field
+              v-model="customColorHex"
+              label="Custom Color"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+            ></v-text-field>
+            <v-btn variant="tonal" color="primary" @click="addCustomColorSwatch">
+              Save Swatch
+            </v-btn>
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-btn variant="text" color="error" @click="removeManualColorOverride">
+            Remove Override
+          </v-btn>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showColorDialog = false">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="showProjectsDialog" max-width="720">
+      <v-card>
+        <v-card-title class="d-flex align-center justify-space-between">
+          <span class="text-h6">Projects</span>
+          <v-btn size="small" variant="tonal" color="primary" prepend-icon="mdi-plus" @click="promptSaveProject">
+            New Project Save
+          </v-btn>
+        </v-card-title>
+        <v-card-text>
+          <div v-if="currentProjectName" class="text-body-2 mb-4">
+            Current project: <strong>{{ currentProjectName }}</strong>
+          </div>
+          <div v-if="isProjectsLoading" class="text-medium-emphasis">
+            Loading projects...
+          </div>
+          <v-list v-else-if="projectRecords.length > 0" density="comfortable" bg-color="transparent">
+            <v-list-item
+              v-for="project in projectRecords"
+              :key="project.id"
+              rounded="lg"
+            >
+              <template v-slot:prepend>
+                <v-icon icon="mdi-folder-outline"></v-icon>
+              </template>
+              <v-list-item-title>{{ project.name }}</v-list-item-title>
+              <v-list-item-subtitle>
+                Updated {{ new Date(project.updatedAt).toLocaleString() }}
+              </v-list-item-subtitle>
+              <template v-slot:append>
+                <div class="d-flex align-center">
+                  <v-btn
+                    size="small"
+                    variant="text"
+                    color="primary"
+                    @click="loadProject(project.id)"
+                  >
+                    Open
+                  </v-btn>
+                  <v-btn
+                    icon="mdi-delete-outline"
+                    size="small"
+                    variant="text"
+                    color="error"
+                    @click="deleteProject(project.id)"
+                  ></v-btn>
+                </div>
+              </template>
+            </v-list-item>
+          </v-list>
+          <div v-else class="text-medium-emphasis">
+            No saved projects yet. Save the current editor state to create one.
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showProjectsDialog = false">Close</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -1691,29 +2292,30 @@ const handleDropZoneClick = (event: Event) => {
             </div>
 
             <!-- Chat Overlay with fixed-width wrapping -->
-            <div v-if="parsedChatLines.length > 0 && droppedImageSrc" 
-                class="chat-overlay"
-                :key="renderKey"
-                @mousedown="handleChatMouseDown"
-                @mousemove="handleChatMouseMove"
-                @mouseup="handleChatMouseUpOrLeave"
-                @mouseleave="handleChatMouseUpOrLeave"
-                @wheel="handleChatWheel"
-                :style="chatStyles"
+            <div
+              v-for="overlay in chatOverlays"
+              v-show="overlay.parsedLines.length > 0 && droppedImageSrc"
+              :key="`${overlay.id}-${renderKey}`"
+              class="chat-overlay"
+              @mousedown="handleChatMouseDown($event, overlay.id)"
+              @mousemove="handleChatMouseMove"
+              @mouseup="handleChatMouseUpOrLeave"
+              @mouseleave="handleChatMouseUpOrLeave"
+              @wheel="handleChatWheel($event, overlay.id)"
+              :style="getChatStyles(overlay)"
             >
               <div class="chat-lines-container">
                 <div
-                  v-for="(line, index) in parsedChatLines"
+                  v-for="(line, index) in overlay.parsedLines"
                   :key="line.id"
                   class="chat-line"
-                  :style="{ color: line.color }"
+                  :style="{ width: `${overlay.lineWidth}px` }"
                 >
-                  <!-- Conditionally wrap the text span for black bars -->
-                  <span v-if="showBlackBars" class="with-black-bar">
-                    <span class="chat-text" v-html="applyCensoring(line.text, index)" @mouseup="handleTextSelection"></span>
-                  </span>
-                  <!-- Render text directly if black bars are off -->
-                  <span v-else class="chat-text" v-html="applyCensoring(line.text, index)" @mouseup="handleTextSelection"></span>
+                  <span
+                    :class="['chat-text', { 'chat-text-black-bars': showBlackBars }]"
+                    v-html="buildStyledLineHtml(overlay, index, line.text)"
+                    @mouseup="handleTextSelection"
+                  ></span>
                 </div>
               </div>
             </div>
@@ -1730,11 +2332,70 @@ const handleDropZoneClick = (event: Event) => {
       <!-- Right side chatlog panel -->
       <div class="chatlog-panel" ref="chatPanelRef" :style="{ width: chatPanelFlexBasis }">
         <v-sheet class="fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
-          <div class="text-subtitle-1 mb-1">Chatlog Snippet</div>
+          <div class="project-status mb-3">
+            <div class="text-subtitle-2">Project</div>
+            <div class="text-body-2">
+              {{ currentProjectName || 'Unsaved session' }}
+            </div>
+            <div class="text-caption text-medium-emphasis">
+              {{ currentProjectId ? 'Saved locally in this browser' : 'Use Save Project to keep this work for later' }}
+            </div>
+          </div>
+          <div class="d-flex align-center justify-space-between mb-2">
+            <div class="text-subtitle-1">Chat Layers</div>
+            <v-btn
+              size="small"
+              variant="tonal"
+              color="primary"
+              prepend-icon="mdi-plus"
+              @click="startNewChatLayer"
+            >
+              New Chat
+            </v-btn>
+          </div>
+          <div class="chat-layer-list mb-3">
+            <v-list density="compact" class="pa-0" bg-color="transparent">
+              <v-list-item
+                v-for="overlay in chatOverlays"
+                :key="overlay.id"
+                :active="overlay.id === activeChatOverlayId"
+                rounded="lg"
+                @click="selectChatOverlay(overlay.id)"
+              >
+                <template v-slot:prepend>
+                  <v-icon icon="mdi-message-text-outline" size="small"></v-icon>
+                </template>
+                <v-list-item-title>{{ overlay.name }}</v-list-item-title>
+                <v-list-item-subtitle>{{ overlay.parsedLines.length }} lines</v-list-item-subtitle>
+                <template v-slot:append>
+                  <v-btn
+                    icon="mdi-delete-outline"
+                    size="x-small"
+                    variant="text"
+                    color="error"
+                    @click.stop="removeChatOverlay(overlay.id)"
+                  ></v-btn>
+                </template>
+              </v-list-item>
+            </v-list>
+            <div v-if="chatOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
+              Parse a chatlog to create your first movable chat layer.
+            </div>
+          </div>
+          <div class="d-flex align-center justify-space-between mb-1">
+            <div class="text-subtitle-2">
+              {{ activeChatOverlay ? 'Edit Selected Chat' : 'New Chat Draft' }}
+            </div>
+            <v-chip size="small" variant="outlined">
+              {{ activeChatOverlay ? 'Selected' : 'Unparsed' }}
+            </v-chip>
+          </div>
           <div class="flex-grow-1 d-flex flex-column" style="overflow-y: hidden;">
             <v-textarea
               v-model="chatlogText"
-              placeholder="Paste your chat lines here!&#10;Hit 'Parse' afterwards to see color-swatched parsed lines on your image."
+              :placeholder="activeChatOverlay
+                ? 'Edit the selected chat layer, then hit Parse or Ctrl+Enter to update it.'
+                : 'Paste a new chatlog here, then hit Parse or Ctrl+Enter to add it as a new layer.'"
               class="chatlog-textarea mb-1"
               density="compact"
               variant="outlined"
@@ -1765,7 +2426,7 @@ const handleDropZoneClick = (event: Event) => {
                   @click="parseChatlog"
                   density="compact"
                 >
-                  Parse
+                  {{ activeChatOverlay ? 'Update' : 'Parse' }}
                 </v-btn>
               </v-col>
             </v-row>
@@ -1826,15 +2487,16 @@ const handleDropZoneClick = (event: Event) => {
   display: inline;
   padding-right: 5px;
   user-select: text !important;
-  cursor: text;
+  cursor: inherit;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
 
-.with-black-bar {
+.chat-text-black-bars {
   background-color: #000000;
-  padding: 0 4px;
-  display: inline; /* Changed from block to inline */
+  box-shadow:
+    -2px 0 0 #000000,
+    2px 0 0 #000000;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
@@ -1904,23 +2566,29 @@ const handleDropZoneClick = (event: Event) => {
 :deep(.censored-invisible) {
   opacity: 0;
   user-select: text;
-  display: inline-block;
+  display: inline;
   background-color: transparent;
+  text-shadow: none !important;
 }
 
 :deep(.censored-blackbar) {
   background-color: #000000;
   color: transparent;
   user-select: text;
-  display: inline-block;
-  padding: 0 2px;
+  display: inline;
+  padding: 0;
+  text-shadow: none !important;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 :deep(.censored-blur) {
   filter: blur(5px);
   user-select: text;
-  display: inline-block;
-  padding: 0 2px;
+  display: inline;
+  padding: 0;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 .fill-height {
@@ -2002,6 +2670,36 @@ const handleDropZoneClick = (event: Event) => {
   padding: 4px;
 }
 
+.swatch-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.color-swatch {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+}
+
+.native-color-picker {
+  width: 48px;
+  height: 48px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.project-status {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
 .aspect-ratio-container {
   position: relative;
   width: 100%;
@@ -2041,8 +2739,3 @@ const handleDropZoneClick = (event: Event) => {
   align-items: center;
 }
 </style>
-
-
-
-
-
