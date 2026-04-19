@@ -1,11 +1,58 @@
 // src/components/Footer.vue
 <script setup>
-import { ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.8-beta'; // Incremented version
+const version = 'v2.0.11-beta'; // Incremented version
+const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
+const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.11-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed native browser drag behavior on the rendered preview so the canvas can no longer be picked up like an image when drag modes are disabled',
+                    'Fixed preview interaction edge cases by blocking dragstart across the drop zone, base image, effect layers, and chat overlays'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.10-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed deployed canvas chat overlays still allowing text selection when drag mode was disabled',
+                    'Fixed chat display selection behavior so only the editor textarea can be used for text selection and censoring workflows'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.9-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added a last-seen changelog tracker that shows a small New indicator when a newer version is available than the one the user last opened'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Added editor-style unsaved work protection when starting a new session or loading a different project',
+                    'Improved project status messaging so the editor clearly tells you when the current session has unsaved changes'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.8-beta',
         date: 'APR-19-2026',
@@ -234,6 +281,35 @@ const getChangeTypeIcon = (type) => {
         default: return { icon: 'mdi-circle-small', color: 'primary', label: 'Changes' };
     }
 };
+
+const hasUnreadChangelog = computed(() =>
+    Boolean(lastSeenVersion.value) && lastSeenVersion.value !== version
+);
+
+const markChangelogAsSeen = () => {
+    lastSeenVersion.value = version;
+
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(LAST_SEEN_CHANGELOG_VERSION_KEY, version);
+};
+
+const openChangelog = () => {
+    showChangelogDialog.value = true;
+    markChangelogAsSeen();
+};
+
+onMounted(() => {
+    if (typeof window === 'undefined') return;
+
+    const storedVersion = window.localStorage.getItem(LAST_SEEN_CHANGELOG_VERSION_KEY);
+    lastSeenVersion.value = storedVersion || version;
+});
+
+watch(showChangelogDialog, (isOpen) => {
+    if (isOpen) {
+        markChangelogAsSeen();
+    }
+});
 </script>
 
 <template>
@@ -253,10 +329,19 @@ const getChangeTypeIcon = (type) => {
                 <v-btn
                     variant="text"
                     density="comfortable"
-                    class="text-caption"
-                    @click="showChangelogDialog = true"
+                    class="text-caption changelog-button"
+                    @click="openChangelog"
                 >
                     {{ version }} - Changelog
+                    <v-chip
+                        v-if="hasUnreadChangelog"
+                        size="x-small"
+                        color="primary"
+                        variant="flat"
+                        class="ml-2 changelog-indicator"
+                    >
+                        New
+                    </v-chip>
                 </v-btn>
                 <v-divider vertical class="mx-2"></v-divider>
                 <div class="text-caption">
@@ -333,6 +418,15 @@ const getChangeTypeIcon = (type) => {
 
 .v-btn.text-caption:hover {
     opacity: 1;
+}
+
+.changelog-button {
+    overflow: visible;
+}
+
+.changelog-indicator {
+    min-width: 0;
+    letter-spacing: 0.02em;
 }
 
 /* Style changes for the changelog dialog */

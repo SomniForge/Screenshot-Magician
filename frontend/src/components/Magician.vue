@@ -155,7 +155,18 @@ interface BuiltInThemeOption {
   darkPreview: string[];
 }
 
+interface PendingEditorAction {
+  type: 'new-session' | 'load-project';
+  projectId?: string;
+}
+
 const DEFAULT_CHAT_LINE_WIDTH = 640;
+const DEFAULT_SELECTED_TEXT = {
+  lineIndex: -1,
+  startOffset: 0,
+  endOffset: 0,
+  text: ''
+};
 const PROJECTS_DB_NAME = 'screenshot-magician-projects';
 const PROJECTS_STORE_NAME = 'projects';
 const PROJECTS_DB_VERSION = 1;
@@ -172,6 +183,9 @@ const activeChatOverlay = computed(() =>
 const projectRecords = ref<Array<Pick<ProjectRecord, 'id' | 'name' | 'createdAt' | 'updatedAt'>>>([]);
 const currentProjectId = ref<string | null>(null);
 const currentProjectName = ref('');
+const showUnsavedChangesDialog = ref(false);
+const pendingEditorAction = ref<PendingEditorAction | null>(null);
+const lastSavedSnapshotSignature = ref('');
 const showProjectsDialog = ref(false);
 const showSaveProjectDialog = ref(false);
 const showEffectsDialog = ref(false);
@@ -1094,6 +1108,35 @@ const createEditorSnapshot = (): EditorStateSnapshot => ({
 const toSerializableSnapshot = (snapshot: EditorStateSnapshot): EditorStateSnapshot =>
   JSON.parse(JSON.stringify(snapshot)) as EditorStateSnapshot;
 
+const createComparableSnapshot = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => ({
+  ...toSerializableSnapshot(snapshot),
+  selectedText: { ...DEFAULT_SELECTED_TEXT }
+});
+
+const getSnapshotSignature = (snapshot: EditorStateSnapshot = createEditorSnapshot()) =>
+  JSON.stringify(createComparableSnapshot(snapshot));
+
+const markCurrentStateAsSaved = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => {
+  lastSavedSnapshotSignature.value = getSnapshotSignature(snapshot);
+};
+
+const hasUnsavedChanges = computed(() =>
+  getSnapshotSignature() !== lastSavedSnapshotSignature.value
+);
+
+const pendingActionDescription = computed(() => {
+  if (!pendingEditorAction.value) return '';
+
+  if (pendingEditorAction.value.type === 'load-project') {
+    const targetProject = projectRecords.value.find((project) => project.id === pendingEditorAction.value?.projectId);
+    return targetProject
+      ? `open "${targetProject.name}"`
+      : 'open another project';
+  }
+
+  return 'start a new session';
+});
+
 const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
   characterName.value = snapshot.characterName || '';
   chatlogText.value = snapshot.chatlogText || '';
@@ -1107,7 +1150,7 @@ const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
   isImageDraggingEnabled.value = snapshot.isImageDraggingEnabled || false;
   isChatDraggingEnabled.value = snapshot.isChatDraggingEnabled || false;
   showBlackBars.value = snapshot.showBlackBars || false;
-  Object.assign(selectedText, snapshot.selectedText || { lineIndex: -1, startOffset: 0, endOffset: 0, text: '' });
+  Object.assign(selectedText, snapshot.selectedText || DEFAULT_SELECTED_TEXT);
   chatLineWidth.value = snapshot.chatLineWidth || DEFAULT_CHAT_LINE_WIDTH;
   chatOverlays.value = Array.isArray(snapshot.chatOverlays)
     ? snapshot.chatOverlays.map((overlay, index) => cloneChatOverlay(overlay, index))
@@ -2157,14 +2200,14 @@ const resetSession = () => {
   isChatPanning.value = false;
 
   // Reset censoring data
-  selectedText.lineIndex = -1;
-  selectedText.startOffset = 0;
-  selectedText.endOffset = 0;
-  selectedText.text = '';
+  Object.assign(selectedText, DEFAULT_SELECTED_TEXT);
+  markCurrentStateAsSaved();
   renderKey.value++;
   
   // Close the confirmation dialog
   showNewSessionDialog.value = false;
+  showUnsavedChangesDialog.value = false;
+  pendingEditorAction.value = null;
 };
 
 // Add state for black bars toggle
@@ -2176,10 +2219,7 @@ const toggleBlackBars = () => {
 };
 
 const selectedText = reactive({
-  lineIndex: -1,
-  startOffset: 0,
-  endOffset: 0,
-  text: ''
+  ...DEFAULT_SELECTED_TEXT
 });
 
 // Add a key to force re-render when censoring changes
@@ -2561,6 +2601,7 @@ onMounted(() => {
   loadCharacterName();
   loadCustomColorSwatches();
   loadEditorState();
+  markCurrentStateAsSaved();
   refreshProjectList();
   showTutorialIfNeeded();
   
@@ -2593,6 +2634,62 @@ const openProjectsManager = async () => {
   await refreshProjectList();
 };
 
+const closeSaveProjectDialog = () => {
+  showSaveProjectDialog.value = false;
+  pendingEditorAction.value = null;
+};
+
+const closePendingEditorAction = () => {
+  showUnsavedChangesDialog.value = false;
+  pendingEditorAction.value = null;
+};
+
+const requestEditorAction = async (action: PendingEditorAction) => {
+  if (hasUnsavedChanges.value) {
+    pendingEditorAction.value = action;
+    showUnsavedChangesDialog.value = true;
+    return;
+  }
+
+  if (action.type === 'new-session') {
+    showNewSessionDialog.value = true;
+    return;
+  }
+
+  if (action.type === 'load-project' && action.projectId) {
+    await loadProject(action.projectId, { bypassUnsavedCheck: true });
+  }
+};
+
+const saveAndContinuePendingAction = async () => {
+  if (!pendingEditorAction.value) return;
+
+  if (!currentProjectId.value) {
+    pendingProjectName.value = currentProjectName.value || `Project ${projectRecords.value.length + 1}`;
+    showUnsavedChangesDialog.value = false;
+    showSaveProjectDialog.value = true;
+    return;
+  }
+
+  pendingProjectName.value = currentProjectName.value;
+  await saveProject(false);
+};
+
+const discardAndContinuePendingAction = async () => {
+  const action = pendingEditorAction.value;
+  closePendingEditorAction();
+  if (!action) return;
+
+  if (action.type === 'new-session') {
+    resetSession();
+    return;
+  }
+
+  if (action.type === 'load-project' && action.projectId) {
+    await loadProject(action.projectId, { bypassUnsavedCheck: true });
+  }
+};
+
 const promptSaveProject = () => {
   pendingProjectName.value = currentProjectName.value || `Project ${projectRecords.value.length + 1}`;
   showSaveProjectDialog.value = true;
@@ -2620,14 +2717,32 @@ const saveProject = async (forceNewProject = false) => {
     await saveStoredProject(projectRecord);
     currentProjectId.value = projectRecord.id;
     currentProjectName.value = projectRecord.name;
+    markCurrentStateAsSaved(projectRecord.snapshot);
     showSaveProjectDialog.value = false;
     await refreshProjectList();
+
+    if (pendingEditorAction.value) {
+      const action = pendingEditorAction.value;
+      closePendingEditorAction();
+
+      if (action.type === 'new-session') {
+        resetSession();
+      } else if (action.type === 'load-project' && action.projectId) {
+        await loadProject(action.projectId, { bypassUnsavedCheck: true });
+      }
+    }
   } catch (error) {
     console.error('Error saving project:', error);
   }
 };
 
-const loadProject = async (projectId: string) => {
+const loadProject = async (projectId: string, options?: { bypassUnsavedCheck?: boolean }) => {
+  if (!options?.bypassUnsavedCheck && hasUnsavedChanges.value) {
+    pendingEditorAction.value = { type: 'load-project', projectId };
+    showUnsavedChangesDialog.value = true;
+    return;
+  }
+
   try {
     const project = await loadStoredProject(projectId);
     if (!project) return;
@@ -2635,6 +2750,8 @@ const loadProject = async (projectId: string) => {
     applyEditorSnapshot(project.snapshot);
     currentProjectId.value = project.id;
     currentProjectName.value = project.name;
+    markCurrentStateAsSaved(project.snapshot);
+    closePendingEditorAction();
     showProjectsDialog.value = false;
   } catch (error) {
     console.error('Error loading project:', error);
@@ -2671,6 +2788,10 @@ const handleDropZoneClick = (event: Event) => {
   }
 };
 
+const preventNativePreviewDrag = (event: DragEvent) => {
+  event.preventDefault();
+};
+
 </script>
 
 <template>
@@ -2682,7 +2803,7 @@ const handleDropZoneClick = (event: Event) => {
             <v-btn 
               v-bind="props" 
               icon="mdi-plus-box-outline"
-              @click="showNewSessionDialog = true"
+              @click="requestEditorAction({ type: 'new-session' })"
             ></v-btn>
           </template>
         </v-tooltip>
@@ -2903,6 +3024,40 @@ const handleDropZoneClick = (event: Event) => {
             @click="resetSession"
           >
             Reset Everything
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="showUnsavedChangesDialog" max-width="460">
+      <v-card>
+        <v-card-title class="text-h6">
+          Unsaved Changes
+        </v-card-title>
+        <v-card-text>
+          Your current work has unsaved changes. Do you want to save before you {{ pendingActionDescription }}?
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn
+            variant="text"
+            @click="closePendingEditorAction"
+          >
+            Cancel
+          </v-btn>
+          <v-btn
+            color="grey-darken-1"
+            variant="text"
+            @click="discardAndContinuePendingAction"
+          >
+            Don't Save
+          </v-btn>
+          <v-btn
+            color="primary"
+            variant="text"
+            @click="saveAndContinuePendingAction"
+          >
+            Save
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -3232,7 +3387,7 @@ const handleDropZoneClick = (event: Event) => {
         </v-card-text>
         <v-card-actions>
           <v-spacer></v-spacer>
-          <v-btn variant="text" @click="showSaveProjectDialog = false">Cancel</v-btn>
+          <v-btn variant="text" @click="closeSaveProjectDialog">Cancel</v-btn>
           <v-btn
             v-if="currentProjectId"
             variant="text"
@@ -3486,6 +3641,7 @@ const handleDropZoneClick = (event: Event) => {
               'clickable': !droppedImageSrc 
             }" 
             :style="dropZoneStyle as CSSProperties"
+            @dragstart="preventNativePreviewDrag"
             @dragover="handleDragOver"
             @dragleave="handleDragLeave"
             @drop="handleDrop"
@@ -3507,7 +3663,8 @@ const handleDropZoneClick = (event: Event) => {
               alt="Dropped Screenshot"
               class="dropped-image"
               :style="imageStyle as CSSProperties"
-              draggable="false" 
+              draggable="false"
+              @dragstart="preventNativePreviewDrag"
               @mousedown="handleImageMouseDown"
               @mousemove="handleImageMouseMove"
               @mouseup="handleImageMouseUpOrLeave"
@@ -3519,6 +3676,7 @@ const handleDropZoneClick = (event: Event) => {
               :key="`${preview.effect.presetId}-${preview.effect.seed}`"
               class="image-effect-layer"
               :style="getImageEffectPreviewStyle(preview) as CSSProperties"
+              @dragstart="preventNativePreviewDrag"
             ></div>
             <!-- Display Placeholder -->
             <div v-if="!droppedImageSrc" class="text-center">
@@ -3536,6 +3694,7 @@ const handleDropZoneClick = (event: Event) => {
               @mousemove="handleChatMouseMove"
               @mouseup="handleChatMouseUpOrLeave"
               @wheel="handleChatWheel($event, overlay.id)"
+              @dragstart="preventNativePreviewDrag"
               :style="getChatStyles(overlay)"
             >
               <div class="chat-lines-container">
@@ -3548,7 +3707,6 @@ const handleDropZoneClick = (event: Event) => {
                   <span
                     :class="['chat-text', { 'chat-text-black-bars': showBlackBars }]"
                     v-html="buildStyledLineHtml(overlay, index, line.text)"
-                    @mouseup="handleTextSelection"
                   ></span>
                 </div>
               </div>
@@ -3572,7 +3730,11 @@ const handleDropZoneClick = (event: Event) => {
               {{ currentProjectName || 'Unsaved session' }}
             </div>
             <div class="text-caption text-medium-emphasis">
-              {{ currentProjectId ? 'Saved locally in this browser' : 'Use Save Project to keep this work for later' }}
+              {{ hasUnsavedChanges
+                ? 'You have unsaved changes.'
+                : currentProjectId
+                  ? 'Saved locally in this browser'
+                  : 'Use Save Project to keep this work for later' }}
             </div>
           </div>
           <div class="d-flex align-center justify-space-between mb-2">
@@ -3749,6 +3911,9 @@ const handleDropZoneClick = (event: Event) => {
   width: 100%;
   height: auto;
   pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
   overflow: visible;
   transform-origin: top left;
   will-change: transform;
@@ -3758,6 +3923,8 @@ const handleDropZoneClick = (event: Event) => {
 .chat-line {
   position: relative;
   display: block;
+  user-select: none;
+  -webkit-user-select: none;
   font-family: Arial, sans-serif;
   font-size: 12px;
   line-height: 1.3;
@@ -3783,7 +3950,8 @@ const handleDropZoneClick = (event: Event) => {
 .chat-text {
   display: inline;
   padding-right: 5px;
-  user-select: text !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
   cursor: inherit;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
@@ -3810,6 +3978,7 @@ const handleDropZoneClick = (event: Event) => {
 .drop-zone {
   border: 2px dashed transparent;
   transition: background-color 0.2s ease, border-color 0.2s ease;
+  -webkit-user-drag: none;
 }
 
 .drop-zone.clickable:hover {
@@ -3840,6 +4009,7 @@ const handleDropZoneClick = (event: Event) => {
 .image-effect-layer {
   border-radius: inherit;
   z-index: 1;
+  -webkit-user-drag: none;
 }
 
 .chatlog-textarea {
@@ -3882,7 +4052,8 @@ const handleDropZoneClick = (event: Event) => {
 /* Censoring styles */
 :deep(.censored-invisible) {
   opacity: 0;
-  user-select: text;
+  user-select: none;
+  -webkit-user-select: none;
   display: inline;
   background-color: transparent;
   text-shadow: none !important;
@@ -3891,7 +4062,8 @@ const handleDropZoneClick = (event: Event) => {
 :deep(.censored-blackbar) {
   background-color: #000000;
   color: transparent;
-  user-select: text;
+  user-select: none;
+  -webkit-user-select: none;
   display: inline;
   padding: 0;
   text-shadow: none !important;
@@ -3901,7 +4073,8 @@ const handleDropZoneClick = (event: Event) => {
 
 :deep(.censored-blur) {
   filter: blur(5px);
-  user-select: text;
+  user-select: none;
+  -webkit-user-select: none;
   display: inline;
   padding: 0;
   box-decoration-break: clone;
