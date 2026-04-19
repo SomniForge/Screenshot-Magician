@@ -1,11 +1,12 @@
 // src/components/Magician.vue
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { type CSSProperties } from 'vue';
 import { useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
 import { createEditorThemeDefinition, editorThemeFamilies, editorThemePresets } from '@/plugins/vuetify';
+import { useAdPreferences } from '@/composables/useAdPreferences';
 
 const chatlogText = ref('');
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
@@ -52,6 +53,13 @@ interface CensoredRegion {
   startOffset: number;
   endOffset: number;
   type: CensorType;
+}
+
+interface CensoredRegionSummary extends CensoredRegion {
+  id: string;
+  label: string;
+  preview: string;
+  lineText: string;
 }
 
 interface ManualColorRegion {
@@ -190,6 +198,7 @@ const themeDraftColors = reactive<EditorThemePalette>({
   secondary: '#7e57c2'
 });
 const vuetifyTheme = useTheme();
+const { showAds, setShowAds } = useAdPreferences();
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
@@ -2176,6 +2185,119 @@ const selectedText = reactive({
 // Add a key to force re-render when censoring changes
 const renderKey = ref(0);
 
+const getChatlogTextareaElement = () =>
+  document.querySelector('.chatlog-textarea textarea') as HTMLTextAreaElement | null;
+
+const getCensorTypeLabel = (type: CensorType) => {
+  switch (type) {
+    case CensorType.Invisible:
+      return 'Invisible';
+    case CensorType.BlackBar:
+      return 'Black Bar';
+    case CensorType.Blur:
+      return 'Blur';
+    default:
+      return 'None';
+  }
+};
+
+const buildRegionId = (region: CensoredRegion) =>
+  `${region.lineIndex}:${region.startOffset}:${region.endOffset}`;
+
+const getLineTextForRegion = (overlay: ChatOverlay, lineIndex: number) => {
+  const rawLines = overlay.rawText.split('\n');
+  return getDisplayedLineText(rawLines[lineIndex] ?? '');
+};
+
+const getRegionPreviewText = (overlay: ChatOverlay, region: CensoredRegion) => {
+  const lineText = getLineTextForRegion(overlay, region.lineIndex);
+  const start = Math.max(0, Math.min(lineText.length, region.startOffset));
+  const end = Math.max(start, Math.min(lineText.length, region.endOffset));
+
+  return lineText.slice(start, end).trim() || '(Whitespace selection)';
+};
+
+const activeCensoredRegionSummaries = computed<CensoredRegionSummary[]>(() => {
+  if (!activeChatOverlay.value) return [];
+
+  return [...activeChatOverlay.value.censoredRegions]
+    .sort((a, b) =>
+      a.lineIndex - b.lineIndex ||
+      a.startOffset - b.startOffset ||
+      a.endOffset - b.endOffset
+    )
+    .map((region) => {
+      const lineText = getLineTextForRegion(activeChatOverlay.value!, region.lineIndex);
+      return {
+        ...region,
+        id: buildRegionId(region),
+        label: `Line ${region.lineIndex + 1} · ${getCensorTypeLabel(region.type)}`,
+        preview: getRegionPreviewText(activeChatOverlay.value!, region),
+        lineText
+      };
+    });
+});
+
+const isRegionSelected = (region: CensoredRegion) =>
+  selectedText.lineIndex === region.lineIndex &&
+  selectedText.startOffset === region.startOffset &&
+  selectedText.endOffset === region.endOffset;
+
+const removeCensoredRegion = (region: CensoredRegion) => {
+  if (!activeChatOverlay.value) return;
+
+  const regionIndex = activeChatOverlay.value.censoredRegions.findIndex((candidate) =>
+    candidate.lineIndex === region.lineIndex &&
+    candidate.startOffset === region.startOffset &&
+    candidate.endOffset === region.endOffset
+  );
+
+  if (regionIndex === -1) return;
+
+  activeChatOverlay.value.censoredRegions.splice(regionIndex, 1);
+
+  if (isRegionSelected(region)) {
+    selectedText.lineIndex = -1;
+    selectedText.startOffset = 0;
+    selectedText.endOffset = 0;
+    selectedText.text = '';
+  }
+
+  renderKey.value++;
+};
+
+const focusCensoredRegion = async (region: CensoredRegion) => {
+  if (!activeChatOverlay.value) return;
+
+  if (activeChatOverlay.value.rawText !== chatlogText.value) {
+    syncEditorFromActiveOverlay();
+  }
+
+  await nextTick();
+
+  const textarea = getChatlogTextareaElement();
+  if (!textarea) return;
+
+  const rawLines = textarea.value.split('\n');
+  const lineText = rawLines[region.lineIndex] ?? '';
+  const timestampPrefixLength = getTimestampPrefixLength(lineText);
+  const safeStartOffset = Math.max(0, Math.min(getDisplayedLineText(lineText).length, region.startOffset));
+  const safeEndOffset = Math.max(safeStartOffset, Math.min(getDisplayedLineText(lineText).length, region.endOffset));
+  const lineStartOffset = rawLines
+    .slice(0, region.lineIndex)
+    .reduce((total, line) => total + line.length + 1, 0);
+  const selectionStart = lineStartOffset + timestampPrefixLength + safeStartOffset;
+  const selectionEnd = lineStartOffset + timestampPrefixLength + safeEndOffset;
+
+  textarea.focus();
+  textarea.setSelectionRange(selectionStart, selectionEnd);
+
+  selectedText.lineIndex = region.lineIndex;
+  selectedText.startOffset = safeStartOffset;
+  selectedText.endOffset = safeEndOffset;
+  selectedText.text = getRegionPreviewText(activeChatOverlay.value, region);
+};
+
 const getSelectedCensorRegionIndex = () => {
   if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
   return activeChatOverlay.value.censoredRegions.findIndex(
@@ -2278,7 +2400,7 @@ const handleTextSelection = () => {
 
   try {
     // Get the textarea element
-    const textarea = document.querySelector('.chatlog-textarea textarea') as HTMLTextAreaElement;
+    const textarea = getChatlogTextareaElement();
     if (!textarea) return;
 
     const selectedValue = selection.toString().trim();
@@ -2863,6 +2985,23 @@ const handleDropZoneClick = (event: Event) => {
           <v-btn icon="mdi-close" variant="text" @click="showSettingsDialog = false"></v-btn>
         </v-card-title>
         <v-card-text>
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
+              <div class="text-subtitle-1">Ads</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Keep a small home page ad slot visible to help offset hosting, or disable ads entirely for free.
+              </div>
+            </div>
+            <v-switch
+              :model-value="showAds"
+              color="primary"
+              inset
+              hide-details
+              label="Show home page ads"
+              @update:model-value="setShowAds(Boolean($event))"
+            ></v-switch>
+          </div>
+
           <div class="settings-section mb-6">
             <div class="settings-section-header">
               <div class="text-subtitle-1">Theme Presets</div>
@@ -3502,6 +3641,68 @@ const handleDropZoneClick = (event: Event) => {
               @keyup="handleTextSelection"
             ></v-textarea>
           </div>
+          <v-sheet
+            v-if="activeChatOverlay"
+            class="censored-region-panel mb-2"
+            border
+            rounded="lg"
+          >
+            <div class="d-flex align-center justify-space-between mb-2">
+              <div>
+                <div class="text-subtitle-2">Censored Selections</div>
+                <div class="text-caption text-medium-emphasis">
+                  Review what is hidden and remove any item directly from this list.
+                </div>
+              </div>
+              <v-chip size="small" variant="tonal">
+                {{ activeCensoredRegionSummaries.length }}
+              </v-chip>
+            </div>
+
+            <div v-if="activeCensoredRegionSummaries.length === 0" class="text-caption text-medium-emphasis">
+              No censoring has been applied to this chat yet. Select text above to add one.
+            </div>
+
+            <v-list
+              v-else
+              density="compact"
+              class="censored-region-list pa-0"
+              bg-color="transparent"
+            >
+              <v-list-item
+                v-for="region in activeCensoredRegionSummaries"
+                :key="region.id"
+                class="censored-region-item"
+                :active="isRegionSelected(region)"
+                rounded="lg"
+                @click="focusCensoredRegion(region)"
+              >
+                <v-list-item-title class="text-body-2">
+                  {{ region.preview }}
+                </v-list-item-title>
+                <v-list-item-subtitle>
+                  {{ region.label }}
+                </v-list-item-subtitle>
+                <template v-slot:append>
+                  <div class="d-flex align-center ga-1">
+                    <v-btn
+                      icon="mdi-crosshairs"
+                      size="x-small"
+                      variant="text"
+                      @click.stop="focusCensoredRegion(region)"
+                    ></v-btn>
+                    <v-btn
+                      icon="mdi-close-circle-outline"
+                      size="x-small"
+                      variant="text"
+                      color="error"
+                      @click.stop="removeCensoredRegion(region)"
+                    ></v-btn>
+                  </div>
+                </template>
+              </v-list-item>
+            </v-list>
+          </v-sheet>
           <div class="mt-auto pt-1">
             <v-row no-gutters>
               <v-col class="pe-1">
@@ -3651,6 +3852,20 @@ const handleDropZoneClick = (event: Event) => {
   cursor: text;
   height: 100% !important;
   max-height: none !important;
+}
+
+.censored-region-panel {
+  padding: 10px;
+  background: rgba(var(--v-theme-surface), 0.6);
+}
+
+.censored-region-list {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.censored-region-item {
+  margin-bottom: 4px;
 }
 
 .hidden-input {

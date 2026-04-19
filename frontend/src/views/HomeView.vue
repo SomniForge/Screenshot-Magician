@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import AdSlot from '@/components/AdSlot.vue';
+import { useAdPreferences } from '@/composables/useAdPreferences';
+
 const features = [
   {
     icon: 'mdi-clock-fast',
@@ -44,6 +47,8 @@ const timeComparison = [
     magician: '2 sec'
   }
 ];
+
+const { showAds } = useAdPreferences();
 </script>
 
 <template>
@@ -159,6 +164,16 @@ const timeComparison = [
         </v-row>
       </v-container>
     </section>
+
+    <div v-if="showAds" class="home-ad-rail">
+      <v-container class="py-3">
+        <AdSlot
+          compact
+          title="A small note from us"
+          description="A future ad here can help cover hosting costs. If you'd rather not see ads, you can disable them for free in Settings."
+        />
+      </v-container>
+    </div>
   </div>
 </template>
 
@@ -178,6 +193,15 @@ const timeComparison = [
   overflow-y: auto;
   position: relative;
   color: var(--home-text);
+}
+
+.home-ad-rail {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  background: linear-gradient(to top, rgba(18, 19, 19, 0.98), rgba(18, 19, 19, 0.92));
+  border-top: 1px solid var(--home-border);
+  backdrop-filter: blur(10px);
 }
 
 .hero-section {

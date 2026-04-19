@@ -46,6 +46,16 @@ A powerful web-based tool for creating, editing, and managing screenshots with a
    npm run dev
    ```
 
+### AdSense Configuration
+
+To enable the HomeView ad rail with Google AdSense:
+
+1. Copy `.env.example` to `.env.local`
+2. Set `VITE_ADSENSE_CLIENT_ID` to your AdSense publisher ID, for example `ca-pub-xxxxxxxxxxxxxxxx`
+3. Set `VITE_ADSENSE_HOME_RAIL_SLOT` to the ad slot ID for your HomeView unit
+
+The existing in-app ad toggle still controls whether the slot is shown.
+
 ## 🛠️ Usage
 
 1. **Upload an Image**

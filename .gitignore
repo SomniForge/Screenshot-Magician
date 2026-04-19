@@ -49,3 +49,4 @@ coverage/
 # Vue specific
 *.tsbuildinfo
 .cache
+frontend/public/ads.txt

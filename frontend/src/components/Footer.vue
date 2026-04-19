@@ -3,9 +3,29 @@
 import { ref } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.7-beta'; // Incremented version
+const version = 'v2.0.8-beta'; // Incremented version
 
 const changelog = [
+    {
+        version: 'v2.0.8-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added a Censored Selections panel in the chat editor so every censored range is listed clearly for the active chat layer'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved censor management by letting you jump directly to a censored selection or remove it without manually reselecting the same text',
+                    'Added Google AdSense groundwork on the home page with environment-based ad slot configuration and a reusable loader for manual ad units',
+                    'Added Google AdSense site verification meta tag support in the application head for ownership verification'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.7-beta',
         date: 'APR-18-2026',
