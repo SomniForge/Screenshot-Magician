@@ -3,10 +3,11 @@
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { type CSSProperties } from 'vue';
-import { useTheme } from 'vuetify';
+import { useDisplay, useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
 import { createEditorThemeDefinition, editorThemeFamilies, editorThemePresets } from '@/plugins/vuetify';
 import { useAdPreferences } from '@/composables/useAdPreferences';
+import { useAnalytics } from '@/composables/useAnalytics';
 
 const chatlogText = ref('');
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
@@ -212,7 +213,9 @@ const themeDraftColors = reactive<EditorThemePalette>({
   secondary: '#7e57c2'
 });
 const vuetifyTheme = useTheme();
+const { width: viewportWidth } = useDisplay();
 const { showAds, setShowAds } = useAdPreferences();
+const { trackEvent } = useAnalytics();
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
@@ -649,10 +652,20 @@ const toggleImageEffect = (presetId: string) => {
   const existingIndex = imageEffects.value.findIndex((effect) => effect.presetId === presetId);
   if (existingIndex >= 0) {
     imageEffects.value.splice(existingIndex, 1);
+    trackEvent('toggle_image_effect', {
+      effect_id: presetId,
+      enabled: false,
+      ...getAnalyticsContext()
+    });
     return;
   }
 
   imageEffects.value.push(createImageEffectLayer(presetId));
+  trackEvent('toggle_image_effect', {
+    effect_id: presetId,
+    enabled: true,
+    ...getAnalyticsContext()
+  });
 };
 
 const setImageEffectOpacity = (presetId: string, opacity: number) => {
@@ -1137,6 +1150,17 @@ const pendingActionDescription = computed(() => {
   return 'start a new session';
 });
 
+const isCompactToolbar = computed(() => viewportWidth.value < 1400);
+
+const getAnalyticsContext = () => ({
+  has_image: Boolean(droppedImageSrc.value),
+  canvas_width: dropZoneWidth.value || 800,
+  canvas_height: dropZoneHeight.value || 600,
+  chat_layers_count: chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0).length,
+  image_effects_count: imageEffects.value.length,
+  line_width: chatLineWidth.value
+});
+
 const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
   characterName.value = snapshot.characterName || '';
   chatlogText.value = snapshot.chatlogText || '';
@@ -1528,6 +1552,7 @@ const reparseChatOverlays = () => {
 const parseChatlog = () => {
   const rawText = chatlogText.value;
   const parsedLines = parseChatText(rawText);
+  const isEditingExistingOverlay = Boolean(activeChatOverlay.value);
 
   if (parsedLines.length === 0) {
     if (activeChatOverlay.value) {
@@ -1562,6 +1587,13 @@ const parseChatlog = () => {
     activeChatOverlayId.value = newOverlay.id;
   }
 
+  trackEvent('parse_chatlog', {
+    mode: isEditingExistingOverlay ? 'update' : 'create',
+    parsed_lines_count: parsedLines.length,
+    raw_characters_count: rawText.length,
+    ...getAnalyticsContext()
+  });
+
   renderKey.value++;
 };
 
@@ -1591,6 +1623,11 @@ const handleFileSelect = (event: Event) => {
         imageTransform.x = 0;
         imageTransform.y = 0;
         imageTransform.scale = 1;
+        trackEvent('import_image', {
+          file_extension: file.name.split('.').pop()?.toLowerCase() || 'unknown',
+          mime_type: file.type || 'unknown',
+          ...getAnalyticsContext()
+        });
       };
       reader.readAsDataURL(file);
     } else {
@@ -1617,6 +1654,12 @@ const handleChatFileSelect = async (event: Event) => {
         const text = await file.text(); // Read file as text
         startNewChatLayer();
         chatlogText.value = text; // Set the textarea content
+        trackEvent('import_chatlog', {
+          file_extension: file.name.split('.').pop()?.toLowerCase() || 'txt',
+          characters_count: text.length,
+          line_breaks_count: text.split('\n').length,
+          ...getAnalyticsContext()
+        });
         parseChatlog(); // Automatically parse the imported chat
       } catch (error) {
         console.error('Error reading chat file:', error);
@@ -2165,6 +2208,10 @@ const saveImage = async () => {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      trackEvent('export_image', {
+        export_format: 'png',
+        ...getAnalyticsContext()
+      });
     }, 'image/png');
 
   } catch (error) {
@@ -2363,6 +2410,13 @@ const applyCensorType = (type: CensorType) => {
     activeChatOverlay.value.censoredRegions[existingIndex].type = type;
   }
 
+  trackEvent('apply_censor', {
+    censor_type: type,
+    selection_length: Math.max(0, selectedText.endOffset - selectedText.startOffset),
+    line_index: selectedText.lineIndex,
+    ...getAnalyticsContext()
+  });
+
   renderKey.value++;
 };
 
@@ -2373,6 +2427,11 @@ const clearCensorType = () => {
   if (existingIndex === undefined || existingIndex === -1) return;
 
   activeChatOverlay.value.censoredRegions.splice(existingIndex, 1);
+  trackEvent('remove_censor', {
+    selection_length: Math.max(0, selectedText.endOffset - selectedText.startOffset),
+    line_index: selectedText.lineIndex,
+    ...getAnalyticsContext()
+  });
   renderKey.value++;
 };
 
@@ -2532,6 +2591,9 @@ const loadCharacterName = () => {
 const openTutorial = () => {
   tutorialStepIndex.value = 0;
   showTutorialDialog.value = true;
+  trackEvent('tutorial_begin', {
+    ...getAnalyticsContext()
+  });
 };
 
 const closeTutorial = () => {
@@ -2555,6 +2617,10 @@ const showTutorialIfNeeded = () => {
 
 const goToNextTutorialStep = () => {
   if (tutorialStepIndex.value >= tutorialSteps.length - 1) {
+    trackEvent('tutorial_complete', {
+      total_steps: tutorialSteps.length,
+      ...getAnalyticsContext()
+    });
     closeTutorial();
     return;
   }
@@ -2700,6 +2766,7 @@ const saveProject = async (forceNewProject = false) => {
   if (!trimmedName) return;
 
   const now = new Date().toISOString();
+  const hadExistingProject = Boolean(currentProjectId.value);
   const projectId = forceNewProject || !currentProjectId.value ? createProjectId() : currentProjectId.value;
   const existingCreatedAt = forceNewProject || !currentProjectId.value
     ? now
@@ -2718,6 +2785,11 @@ const saveProject = async (forceNewProject = false) => {
     currentProjectId.value = projectRecord.id;
     currentProjectName.value = projectRecord.name;
     markCurrentStateAsSaved(projectRecord.snapshot);
+    trackEvent('save_project', {
+      save_mode: forceNewProject ? 'save_as_new' : hadExistingProject ? 'overwrite' : 'create',
+      had_existing_project: hadExistingProject,
+      ...getAnalyticsContext()
+    });
     showSaveProjectDialog.value = false;
     await refreshProjectList();
 
@@ -2751,6 +2823,11 @@ const loadProject = async (projectId: string, options?: { bypassUnsavedCheck?: b
     currentProjectId.value = project.id;
     currentProjectName.value = project.name;
     markCurrentStateAsSaved(project.snapshot);
+    trackEvent('load_project', {
+      ...getAnalyticsContext(),
+      loaded_chat_layers_count: project.snapshot.chatOverlays?.filter((overlay) => overlay.parsedLines?.length > 0).length || 0,
+      loaded_has_image: Boolean(project.snapshot.droppedImageSrc)
+    });
     closePendingEditorAction();
     showProjectsDialog.value = false;
   } catch (error) {
@@ -2796,7 +2873,12 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
 <template>
   <div class="magician-wrapper">
-    <v-toolbar density="compact" color="surface-variant">
+    <v-toolbar
+      density="compact"
+      color="surface-variant"
+      :class="['editor-toolbar', { 'editor-toolbar-compact': isCompactToolbar }]"
+    >
+      <template v-if="!isCompactToolbar">
       <div class="toolbar-button-group">
         <v-tooltip text="New Session" location="bottom">
           <template v-slot:activator="{ props }">
@@ -2998,6 +3080,231 @@ const preventNativePreviewDrag = (event: DragEvent) => {
           </template>
         </v-tooltip>
       </div>
+      </template>
+      <template v-else>
+        <div class="toolbar-compact-layout">
+          <div class="toolbar-compact-row">
+            <div class="toolbar-button-group">
+              <v-tooltip text="New Session" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-plus-box-outline"
+                    @click="requestEditorAction({ type: 'new-session' })"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Import Chatlog" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn v-bind="props" icon="mdi-message-plus-outline" @click="triggerChatFileInput"></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Open Projects" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn v-bind="props" icon="mdi-folder-open-outline" @click="openProjectsManager"></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Save Project" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn v-bind="props" icon="mdi-content-save-cog-outline" @click="saveCurrentProject"></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Settings" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn v-bind="props" icon="mdi-cog-outline" @click="showSettingsDialog = true"></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Show Tutorial" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn v-bind="props" icon="mdi-help-circle-outline" @click="openTutorial"></v-btn>
+                </template>
+              </v-tooltip>
+            </div>
+
+            <div class="toolbar-button-group">
+              <v-menu location="bottom end" :close-on-content-click="false">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    prepend-icon="mdi-account"
+                    append-icon="mdi-chevron-down"
+                    text="Character"
+                    class="text-none"
+                  ></v-btn>
+                </template>
+                <v-card class="toolbar-popover" min-width="280">
+                  <v-card-text>
+                    <v-text-field
+                      v-model="characterName"
+                      label="Character Name"
+                      density="compact"
+                      hide-details
+                      variant="solo-filled"
+                      flat
+                      prepend-inner-icon="mdi-account"
+                      @input="reparseChatOverlays"
+                    ></v-text-field>
+                  </v-card-text>
+                </v-card>
+              </v-menu>
+
+              <v-menu location="bottom end" :close-on-content-click="false">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    prepend-icon="mdi-ruler"
+                    append-icon="mdi-chevron-down"
+                    text="Canvas"
+                    class="text-none"
+                  ></v-btn>
+                </template>
+                <v-card class="toolbar-popover" min-width="280">
+                  <v-card-text class="toolbar-popover-fields">
+                    <v-text-field
+                      v-model.number="dropZoneWidth"
+                      label="Width"
+                      type="number"
+                      density="compact"
+                      hide-details
+                      variant="solo-filled"
+                      flat
+                      prepend-inner-icon="mdi-arrow-expand-horizontal"
+                    ></v-text-field>
+                    <v-text-field
+                      v-model.number="dropZoneHeight"
+                      label="Height"
+                      type="number"
+                      density="compact"
+                      hide-details
+                      variant="solo-filled"
+                      flat
+                      prepend-inner-icon="mdi-arrow-expand-vertical"
+                    ></v-text-field>
+                    <v-text-field
+                      v-model.number="chatLineWidth"
+                      label="Line Width"
+                      type="number"
+                      density="compact"
+                      hide-details
+                      variant="solo-filled"
+                      flat
+                      prepend-inner-icon="mdi-format-line-spacing"
+                      min="300"
+                      max="1200"
+                      @change="renderKey++"
+                    ></v-text-field>
+                  </v-card-text>
+                </v-card>
+              </v-menu>
+            </div>
+          </div>
+
+          <div class="toolbar-compact-row">
+            <div class="toolbar-button-group">
+              <v-tooltip text="Enable Image Drag/Zoom" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-drag-variant"
+                    :color="isImageDraggingEnabled ? 'primary' : undefined"
+                    @click="toggleImageDrag"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Enable Chat Drag/Zoom" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-message-text-lock-outline"
+                    :color="isChatDraggingEnabled ? 'primary' : undefined"
+                    @click="toggleChatDrag"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Toggle Black Bars" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-view-day-outline"
+                    :color="showBlackBars ? 'primary' : undefined"
+                    @click="toggleBlackBars"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+            </div>
+
+            <div class="toolbar-button-group toolbar-button-group-wrap">
+              <v-btn
+                prepend-icon="mdi-image-filter-center-focus"
+                append-icon="mdi-chevron-down"
+                text="Effects"
+                class="text-none"
+                :color="imageEffects.length > 0 ? 'primary' : undefined"
+                @click="showEffectsDialog = true"
+              ></v-btn>
+              <v-menu location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    prepend-icon="mdi-eye-off"
+                    append-icon="mdi-chevron-down"
+                    text="Censor"
+                    class="text-none"
+                    :disabled="selectedText.lineIndex === -1"
+                  ></v-btn>
+                </template>
+                <v-list density="comfortable">
+                  <v-list-item
+                    prepend-icon="mdi-text-box-outline"
+                    title="Invisible"
+                    subtitle="Hide the selected text entirely"
+                    @click="applyCensorType(CensorType.Invisible)"
+                  ></v-list-item>
+                  <v-list-item
+                    prepend-icon="mdi-minus-box"
+                    title="Black Bar"
+                    subtitle="Cover the selection with a solid black bar"
+                    @click="applyCensorType(CensorType.BlackBar)"
+                  ></v-list-item>
+                  <v-list-item
+                    prepend-icon="mdi-blur"
+                    title="Blur"
+                    subtitle="Blur the selected text while keeping its space"
+                    @click="applyCensorType(CensorType.Blur)"
+                  ></v-list-item>
+                  <v-divider></v-divider>
+                  <v-list-item
+                    prepend-icon="mdi-close-circle-outline"
+                    title="Remove Censor"
+                    subtitle="Clear censoring from the selected text"
+                    @click="clearCensorType"
+                  ></v-list-item>
+                </v-list>
+              </v-menu>
+              <v-tooltip text="Color Selection" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-palette-outline"
+                    @click="openColorDialog"
+                    :disabled="selectedText.lineIndex === -1"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Save Image" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-content-save-outline"
+                    @click="saveImage"
+                    :disabled="!droppedImageSrc"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+            </div>
+          </div>
+        </div>
+      </template>
     </v-toolbar>
 
     <!-- New Session Confirmation Dialog -->
@@ -4085,6 +4392,49 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   height: 100%;
 }
 
+.editor-toolbar {
+  overflow: visible;
+}
+
+.editor-toolbar-compact {
+  min-height: auto !important;
+  height: auto !important;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.editor-toolbar-compact :deep(.v-toolbar__content) {
+  height: auto !important;
+  min-height: auto !important;
+  align-items: stretch;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.toolbar-compact-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.toolbar-compact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.toolbar-popover {
+  backdrop-filter: blur(8px);
+}
+
+.toolbar-popover-fields {
+  display: grid;
+  gap: 10px;
+}
+
 .toolbar-button-group .v-btn {
   margin: 0 2px;
 }
@@ -4096,6 +4446,11 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 .toolbar-button-group {
   display: flex;
   align-items: center; /* Align text fields vertically */
+}
+
+.toolbar-button-group-wrap {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .resize-handle {
@@ -4384,6 +4739,16 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 @media (max-width: 960px) {
   .theme-editor-grid {
     grid-template-columns: 1fr;
+  }
+
+  .toolbar-compact-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-button-group,
+  .toolbar-button-group-wrap {
+    justify-content: center;
   }
 }
 

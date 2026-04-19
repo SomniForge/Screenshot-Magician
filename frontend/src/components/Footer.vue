@@ -3,11 +3,48 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.11-beta'; // Incremented version
+const version = 'v2.0.13-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.13-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added custom Google Analytics event tracking for key editor actions such as importing assets, parsing chatlogs, applying censoring, toggling image effects, saving and loading projects, exporting images, and completing the tutorial'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Added a centralized analytics helper so future tracking can be extended cleanly without scattering Google Analytics calls throughout the editor'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.12-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'improved',
+                items: [
+                    'Added a responsive compact toolbar for smaller displays so key editor controls remain usable below 1080p without changing the desktop layout',
+                    'Moved Character and Canvas sizing controls into compact popover panels on narrower viewports to prevent the top bar from becoming too cramped'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed compact toolbar clipping so wrapped controls fully render instead of being cut off inside the default toolbar height at smaller resolutions'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.11-beta',
         date: 'APR-19-2026',
