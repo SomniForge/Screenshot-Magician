@@ -14,6 +14,7 @@ const chatlogText = ref('');
 const unsavedNavigationStore = useUnsavedNavigationStore();
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
 const imageElementRef = ref<HTMLImageElement | null>(null);
+const imageOverlayInputRef = ref<HTMLInputElement | null>(null);
 const isDraggingOverDropZone = ref(false); // Renamed from isDragging for clarity
 const dropZoneWidth = ref<number | null>(800); // Default width
 const dropZoneHeight = ref<number | null>(600); // Default height
@@ -25,6 +26,7 @@ const showNewSessionDialog = ref(false); // Control dialog visibility
 // --- Resizable Chat Panel State ---
 const chatPanelRef = ref<HTMLElement | null>(null);
 const parentRowRef = ref<HTMLElement | null>(null);
+const utilityPanelWidth = ref(320);
 const isResizingChatPanel = ref(false);
 const resizeStartX = ref(0);
 const initialChatPanelBasis = ref(25); // Default basis is 25%
@@ -42,6 +44,16 @@ interface ChatTransform {
   x: number;
   y: number;
   scale: number;
+}
+
+interface ImageOverlay {
+  id: string;
+  name: string;
+  src: string;
+  transform: ChatTransform;
+  opacity: number;
+  isHidden: boolean;
+  isLocked: boolean;
 }
 
 // Censor types enum
@@ -94,6 +106,8 @@ interface EditorStateSnapshot {
   dropZoneWidth: number;
   dropZoneHeight: number;
   imageTransform: ChatTransform;
+  imageOverlays: ImageOverlay[];
+  activeImageOverlayId: string | null;
   imageEffects: ImageEffectLayer[];
   chatOverlays: ChatOverlay[];
   activeChatOverlayId: string | null;
@@ -227,8 +241,13 @@ const SHOW_NAVIGATOR_STORAGE_KEY = 'magicianShowNavigator';
 
 const chatOverlays = ref<ChatOverlay[]>([]);
 const activeChatOverlayId = ref<string | null>(null);
+const imageOverlays = ref<ImageOverlay[]>([]);
+const activeImageOverlayId = ref<string | null>(null);
 const activeChatOverlay = computed(() =>
   chatOverlays.value.find((overlay) => overlay.id === activeChatOverlayId.value) ?? null
+);
+const activeImageOverlay = computed(() =>
+  imageOverlays.value.find((overlay) => overlay.id === activeImageOverlayId.value) ?? null
 );
 
 const projectRecords = ref<Array<Pick<ProjectRecord, 'id' | 'name' | 'createdAt' | 'updatedAt'>>>([]);
@@ -283,6 +302,7 @@ const imageTransform = reactive({ x: 0, y: 0, scale: 1 });
 const isPanning = ref(false);
 const panStart = reactive({ x: 0, y: 0 });
 const panStartImagePos = reactive({ x: 0, y: 0 });
+const activeImageDragTarget = ref<'base' | 'overlay'>('base');
 
 // --- Chat Manipulation State ---
 const isChatDraggingEnabled = ref(false);
@@ -391,7 +411,7 @@ const tutorialSteps: TutorialStep[] = [
   {
     title: 'Start With A Screenshot',
     icon: 'mdi-image-plus-outline',
-    description: 'Drop or click to load your screenshot into the canvas. This becomes the base image everything else builds on.'
+    description: 'Drop or click to load your screenshot into the canvas. Then add as many extra image layers as you want for props, logos, cutouts, or decals.'
   },
   {
     title: 'Add Chat Layers',
@@ -429,9 +449,9 @@ const shortcutGroups: ShortcutGroup[] = [
   {
     title: 'Canvas',
     items: [
-      { label: 'Nudge active image', keys: ['Arrow Keys'] },
-      { label: 'Large nudge active image', keys: ['Shift', 'Arrow Keys'] },
-      { label: 'Zoom active image', keys: ['+', '/ -'] }
+      { label: 'Nudge active image layer', keys: ['Arrow Keys'] },
+      { label: 'Large nudge active image layer', keys: ['Shift', 'Arrow Keys'] },
+      { label: 'Zoom active image layer', keys: ['+', '/ -'] }
     ]
   },
   {
@@ -783,6 +803,9 @@ const showImageMinimap = computed(() =>
 const createOverlayId = () =>
   `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+const createImageOverlayId = () =>
+  `image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
 const createProjectId = () =>
   `project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -791,6 +814,60 @@ const createDefaultChatTransform = (): ChatTransform => ({
   y: 0,
   scale: 1
 });
+
+const getImageOverlayName = (name: string, index: number) => {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    return `Image ${index + 1}`;
+  }
+
+  return trimmedName.length > 32 ? `${trimmedName.slice(0, 32)}...` : trimmedName;
+};
+
+const clampImageOverlayOpacity = (opacity: number) =>
+  Math.min(1, Math.max(0.05, opacity));
+
+const getInitialImageOverlayPlacement = (width: number, height: number, overlayIndex: number) => {
+  const zoneWidth = dropZoneWidth.value || 800;
+  const zoneHeight = dropZoneHeight.value || 600;
+
+  if (width <= 0 || height <= 0) {
+    return {
+      x: 24 * overlayIndex,
+      y: 24 * overlayIndex,
+      scale: 1
+    };
+  }
+
+  const maxScale = Math.min(zoneWidth / width, zoneHeight / height, 1);
+  const safeScale = Number.isFinite(maxScale) && maxScale > 0 ? maxScale : 1;
+  const scaledWidth = width * safeScale;
+  const scaledHeight = height * safeScale;
+
+  return {
+    x: Math.round((zoneWidth - scaledWidth) / 2),
+    y: Math.round((zoneHeight - scaledHeight) / 2),
+    scale: safeScale
+  };
+};
+
+const cloneImageOverlay = (overlay: Partial<ImageOverlay>, index: number): ImageOverlay => ({
+  id: overlay.id || createImageOverlayId(),
+  name: getImageOverlayName(overlay.name || '', index),
+  src: overlay.src || '',
+  transform: {
+    ...createDefaultChatTransform(),
+    ...(overlay.transform || {})
+  },
+  opacity: typeof overlay.opacity === 'number' ? clampImageOverlayOpacity(overlay.opacity) : 1,
+  isHidden: overlay.isHidden ?? false,
+  isLocked: overlay.isLocked ?? false
+});
+
+const selectImageOverlay = (overlayId: string | null) => {
+  activeImageOverlayId.value = overlayId;
+  activeImageDragTarget.value = overlayId ? 'overlay' : 'base';
+};
 
 const createImageEffectSeed = () => Math.floor(Math.random() * 2147483647);
 
@@ -1282,6 +1359,8 @@ const createEditorSnapshot = (): EditorStateSnapshot => ({
   dropZoneWidth: dropZoneWidth.value || 800,
   dropZoneHeight: dropZoneHeight.value || 600,
   imageTransform: { ...imageTransform },
+  imageOverlays: imageOverlays.value.map((overlay, index) => cloneImageOverlay(overlay, index)),
+  activeImageOverlayId: activeImageOverlayId.value,
   imageEffects: imageEffects.value.map((effect) => cloneImageEffectLayer(effect)),
   chatOverlays: chatOverlays.value.map((overlay, index) => cloneChatOverlay(overlay, index)),
   activeChatOverlayId: activeChatOverlayId.value,
@@ -1397,6 +1476,13 @@ const isEditableEventTarget = (target: EventTarget | null) =>
   || (target instanceof HTMLElement && target.isContentEditable);
 
 const nudgeImage = (deltaX: number, deltaY: number) => {
+  if (activeImageDragTarget.value === 'overlay') {
+    if (!activeImageOverlay.value || activeImageOverlay.value.isLocked) return false;
+    activeImageOverlay.value.transform.x += deltaX;
+    activeImageOverlay.value.transform.y += deltaY;
+    return true;
+  }
+
   if (!droppedImageSrc.value) return false;
 
   imageTransform.x += deltaX;
@@ -1414,11 +1500,21 @@ const nudgeActiveChatOverlay = (deltaX: number, deltaY: number) => {
 };
 
 const zoomImage = (direction: 'in' | 'out') => {
-  if (!droppedImageSrc.value) return false;
-
   const scaleAmount = 0.1;
   const minScale = 0.1;
   const maxScale = 10;
+
+  if (activeImageDragTarget.value === 'overlay') {
+    if (!activeImageOverlay.value || activeImageOverlay.value.isLocked) return false;
+
+    activeImageOverlay.value.transform.scale = direction === 'in'
+      ? Math.min(maxScale, activeImageOverlay.value.transform.scale + scaleAmount)
+      : Math.max(minScale, activeImageOverlay.value.transform.scale - scaleAmount);
+
+    return true;
+  }
+
+  if (!droppedImageSrc.value) return false;
 
   imageTransform.scale = direction === 'in'
     ? Math.min(maxScale, imageTransform.scale + scaleAmount)
@@ -1608,6 +1704,7 @@ const getAnalyticsContext = () => ({
   has_image: Boolean(droppedImageSrc.value),
   canvas_width: dropZoneWidth.value || 800,
   canvas_height: dropZoneHeight.value || 600,
+  image_layers_count: imageOverlays.value.length,
   chat_layers_count: chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0).length,
   image_effects_count: imageEffects.value.length,
   line_width: chatLineWidth.value
@@ -1644,6 +1741,13 @@ const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
   dropZoneWidth.value = snapshot.dropZoneWidth || 800;
   dropZoneHeight.value = snapshot.dropZoneHeight || 600;
   Object.assign(imageTransform, snapshot.imageTransform || { x: 0, y: 0, scale: 1 });
+  imageOverlays.value = Array.isArray(snapshot.imageOverlays)
+    ? snapshot.imageOverlays
+      .filter((overlay) => typeof overlay?.src === 'string' && overlay.src.length > 0)
+      .map((overlay, index) => cloneImageOverlay(overlay, index))
+    : [];
+  activeImageOverlayId.value = snapshot.activeImageOverlayId || null;
+  activeImageDragTarget.value = activeImageOverlayId.value ? 'overlay' : 'base';
   imageEffects.value = Array.isArray(snapshot.imageEffects)
     ? snapshot.imageEffects.map((effect) => cloneImageEffectLayer(effect))
     : [];
@@ -2128,6 +2232,56 @@ const triggerFileInput = () => {
   }
 };
 
+const triggerImageOverlayInput = () => {
+  if (imageOverlayInputRef.value) {
+    imageOverlayInputRef.value.click();
+  }
+};
+
+const setBaseImageFromDataUrl = (src: string) => {
+  droppedImageSrc.value = src;
+  imageTransform.x = 0;
+  imageTransform.y = 0;
+  imageTransform.scale = 1;
+  selectImageOverlay(null);
+};
+
+const addImageOverlayFromFile = async (file: File, src: string) => {
+  const overlayIndex = imageOverlays.value.length;
+  const placement = await new Promise<{ x: number; y: number; scale: number }>((resolve) => {
+    const overlayImage = new Image();
+    overlayImage.onload = () => {
+      resolve(getInitialImageOverlayPlacement(overlayImage.naturalWidth, overlayImage.naturalHeight, overlayIndex));
+    };
+    overlayImage.onerror = () => {
+      resolve(getInitialImageOverlayPlacement(0, 0, overlayIndex));
+    };
+    overlayImage.src = src;
+  });
+
+  const overlay = cloneImageOverlay({
+    id: createImageOverlayId(),
+    name: file.name.replace(/\.[^.]+$/, ''),
+    src,
+    transform: placement,
+    opacity: 1,
+    isHidden: false,
+    isLocked: false
+  }, overlayIndex);
+
+  imageOverlays.value.push(overlay);
+  selectImageOverlay(overlay.id);
+  isImageDraggingEnabled.value = true;
+  isChatDraggingEnabled.value = false;
+
+  trackEvent('import_image_overlay', {
+    file_extension: file.name.split('.').pop()?.toLowerCase() || 'unknown',
+    mime_type: file.type || 'unknown',
+    overlay_layers_count: imageOverlays.value.length,
+    ...getAnalyticsContext()
+  });
+};
+
 // Handle image file selection from file picker
 const handleFileSelect = (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -2140,11 +2294,7 @@ const handleFileSelect = (event: Event) => {
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
       reader.onload = (e) => {
-        droppedImageSrc.value = e.target?.result as string;
-        // Reset image transform
-        imageTransform.x = 0;
-        imageTransform.y = 0;
-        imageTransform.scale = 1;
+        setBaseImageFromDataUrl(e.target?.result as string);
         trackEvent('import_image', {
           file_extension: file.name.split('.').pop()?.toLowerCase() || 'unknown',
           mime_type: file.type || 'unknown',
@@ -2158,6 +2308,28 @@ const handleFileSelect = (event: Event) => {
     }
     
     // Reset the input so the same file can be selected again
+    target.value = '';
+  }
+};
+
+const handleImageOverlayFileSelect = (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const files = target.files;
+
+  if (files && files.length > 0) {
+    Array.from(files).forEach((file) => {
+      if (!file.type.startsWith('image/')) {
+        console.warn('Selected overlay file is not an image.');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        addImageOverlayFromFile(file, e.target?.result as string);
+      };
+      reader.readAsDataURL(file);
+    });
+
     target.value = '';
   }
 };
@@ -2297,11 +2469,17 @@ const handleDrop = (event: DragEvent) => {
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
       reader.onload = (e) => {
-        droppedImageSrc.value = e.target?.result as string;
-        // Reset image transform when new image is dropped
-        imageTransform.x = 0;
-        imageTransform.y = 0;
-        imageTransform.scale = 1;
+        if (!droppedImageSrc.value) {
+          setBaseImageFromDataUrl(e.target?.result as string);
+          trackEvent('import_image', {
+            file_extension: file.name.split('.').pop()?.toLowerCase() || 'unknown',
+            mime_type: file.type || 'unknown',
+            ...getAnalyticsContext()
+          });
+          return;
+        }
+
+        addImageOverlayFromFile(file, e.target?.result as string);
       };
       reader.readAsDataURL(file);
     } else {
@@ -2314,6 +2492,8 @@ const handleDrop = (event: DragEvent) => {
 // --- Image Panning Handlers ---
 const handleImageMouseDown = (event: MouseEvent) => {
   if (!isImageDraggingEnabled.value || !droppedImageSrc.value) return;
+  if (activeImageOverlayId.value !== null) return;
+  selectImageOverlay(null);
   event.preventDefault();
   isPanning.value = true;
   panStart.x = event.clientX;
@@ -2330,6 +2510,13 @@ const handleImageMouseMove = (event: MouseEvent) => {
   if (!isPanning.value) return;
   const deltaX = event.clientX - panStart.x;
   const deltaY = event.clientY - panStart.y;
+
+  if (activeImageDragTarget.value === 'overlay' && activeImageOverlay.value) {
+    activeImageOverlay.value.transform.x = panStartImagePos.x + deltaX;
+    activeImageOverlay.value.transform.y = panStartImagePos.y + deltaY;
+    return;
+  }
+
   imageTransform.x = panStartImagePos.x + deltaX;
   imageTransform.y = panStartImagePos.y + deltaY;
 };
@@ -2347,6 +2534,10 @@ const handleImageMouseUpOrLeave = () => {
 // --- Image Zoom Handler ---
 const handleWheel = (event: WheelEvent) => {
   if (!isImageDraggingEnabled.value || !droppedImageSrc.value) return;
+  if (activeImageOverlayId.value !== null) {
+    event.preventDefault();
+    return;
+  }
   event.preventDefault();
   const scaleAmount = 0.1;
   const minScale = 0.1;
@@ -2367,6 +2558,10 @@ const toggleImageDrag = () => {
   if (isImageDraggingEnabled.value && isChatDraggingEnabled.value) {
     isChatDraggingEnabled.value = false; // Disable chat drag if enabling image drag
   }
+
+  if (!isImageDraggingEnabled.value && isPanning.value) {
+    handleImageMouseUpOrLeave();
+  }
 };
 
 const enableImageDragFromCanvas = (event: MouseEvent) => {
@@ -2374,8 +2569,62 @@ const enableImageDragFromCanvas = (event: MouseEvent) => {
 
   event.preventDefault();
   event.stopPropagation();
+  selectImageOverlay(null);
   isImageDraggingEnabled.value = true;
   isChatDraggingEnabled.value = false;
+};
+
+const handleImageOverlayMouseDown = (event: MouseEvent, overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay) return;
+
+  if (activeImageOverlayId.value !== overlayId) {
+    return;
+  }
+
+  if (overlay.isLocked || !isImageDraggingEnabled.value) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  isPanning.value = true;
+  panStart.x = event.clientX;
+  panStart.y = event.clientY;
+  panStartImagePos.x = overlay.transform.x;
+  panStartImagePos.y = overlay.transform.y;
+  document.body.style.userSelect = 'none';
+  document.addEventListener('mousemove', handleImageMouseMove);
+  document.addEventListener('mouseup', handleImageMouseUpOrLeave);
+};
+
+const enableImageOverlayDragFromCanvas = (event: MouseEvent, overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay || overlay.isLocked) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  selectImageOverlay(overlayId);
+  isImageDraggingEnabled.value = true;
+  isChatDraggingEnabled.value = false;
+};
+
+const handleImageOverlayWheel = (event: WheelEvent, overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay || !isImageDraggingEnabled.value) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (overlay.isLocked || activeImageOverlayId.value !== overlayId) {
+    return;
+  }
+
+  const scaleAmount = 0.1;
+  const minScale = 0.1;
+  const maxScale = 10;
+
+  overlay.transform.scale = event.deltaY < 0
+    ? Math.min(maxScale, overlay.transform.scale + scaleAmount)
+    : Math.max(minScale, overlay.transform.scale - scaleAmount);
 };
 
 // --- Chat Dragging Handlers ---
@@ -2551,6 +2800,107 @@ const handleResizeMouseUp = () => {
   console.log("Resize complete");
 };
 
+const getImageOverlayStyles = (overlay: ImageOverlay) => {
+  const isActiveOverlay = activeImageOverlayId.value === overlay.id;
+  const overlayIndex = imageOverlays.value.findIndex((item) => item.id === overlay.id);
+
+  return {
+    position: 'absolute' as const,
+    top: '0',
+    left: '0',
+    maxWidth: 'none',
+    maxHeight: 'none',
+    transformOrigin: 'top left',
+    transform: `translate(${overlay.transform.x}px, ${overlay.transform.y}px) scale(${overlay.transform.scale})`,
+    opacity: String(overlay.opacity),
+    cursor: overlay.isLocked
+      ? 'not-allowed'
+      : isImageDraggingEnabled.value
+        ? (isActiveOverlay && isPanning.value ? 'grabbing' : 'grab')
+        : 'pointer',
+    outline: isActiveOverlay ? `1px dashed ${overlay.isLocked ? 'rgba(239, 83, 80, 0.9)' : 'rgba(66, 165, 245, 0.9)'}` : 'none',
+    outlineOffset: '2px',
+    zIndex: 1 + Math.max(overlayIndex, 0)
+  };
+};
+
+const moveImageOverlay = (overlayId: string, direction: 'forward' | 'backward') => {
+  const overlayIndex = imageOverlays.value.findIndex((overlay) => overlay.id === overlayId);
+  if (overlayIndex === -1) return;
+
+  const targetIndex = direction === 'forward' ? overlayIndex + 1 : overlayIndex - 1;
+  if (targetIndex < 0 || targetIndex >= imageOverlays.value.length) return;
+
+  const [overlay] = imageOverlays.value.splice(overlayIndex, 1);
+  imageOverlays.value.splice(targetIndex, 0, overlay);
+};
+
+const duplicateImageOverlay = (overlayId: string) => {
+  const sourceOverlay = imageOverlays.value.find((overlay) => overlay.id === overlayId);
+  if (!sourceOverlay) return;
+
+  const overlayIndex = imageOverlays.value.length;
+  const duplicatedOverlay = cloneImageOverlay({
+    ...sourceOverlay,
+    id: createImageOverlayId(),
+    name: `${sourceOverlay.name} Copy`,
+    transform: {
+      ...sourceOverlay.transform,
+      x: sourceOverlay.transform.x + 16,
+      y: sourceOverlay.transform.y + 16
+    }
+  }, overlayIndex);
+
+  imageOverlays.value.push(duplicatedOverlay);
+  selectImageOverlay(duplicatedOverlay.id);
+};
+
+const removeImageOverlay = (overlayId: string) => {
+  const overlayIndex = imageOverlays.value.findIndex((overlay) => overlay.id === overlayId);
+  if (overlayIndex === -1) return;
+
+  if (activeImageOverlayId.value === overlayId && isPanning.value) {
+    handleImageMouseUpOrLeave();
+  }
+
+  imageOverlays.value.splice(overlayIndex, 1);
+
+  if (activeImageOverlayId.value === overlayId) {
+    const nextOverlay = imageOverlays.value[Math.max(0, overlayIndex - 1)] ?? imageOverlays.value[0] ?? null;
+    selectImageOverlay(nextOverlay?.id ?? null);
+  }
+};
+
+const toggleImageOverlayVisibility = (overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay) return;
+
+  overlay.isHidden = !overlay.isHidden;
+
+  if (overlay.isHidden && activeImageOverlayId.value === overlayId && isPanning.value) {
+    handleImageMouseUpOrLeave();
+  }
+};
+
+const toggleImageOverlayLock = (overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay) return;
+
+  overlay.isLocked = !overlay.isLocked;
+
+  if (overlay.isLocked && isPanning.value && activeImageOverlayId.value === overlayId) {
+    handleImageMouseUpOrLeave();
+  }
+};
+
+const resetActiveImageOverlayView = () => {
+  if (!activeImageOverlay.value) return;
+
+  activeImageOverlay.value.transform.x = 0;
+  activeImageOverlay.value.transform.y = 0;
+  activeImageOverlay.value.transform.scale = 1;
+};
+
 // Update chat overlay styles
 const getChatStyles = (overlay: ChatOverlay) => {
   const isActiveOverlay = activeChatOverlayId.value === overlay.id;
@@ -2646,6 +2996,24 @@ const saveImage = async () => {
     );
 
     ctx.restore(); // Restore context after drawing image
+
+    const visibleImageOverlays = imageOverlays.value.filter((overlay) => !overlay.isHidden && overlay.src);
+
+    for (const overlay of visibleImageOverlays) {
+      const overlayImage = new Image();
+      overlayImage.src = overlay.src;
+      await new Promise((resolve, reject) => {
+        overlayImage.onload = resolve;
+        overlayImage.onerror = reject;
+      });
+
+      ctx.save();
+      ctx.globalAlpha = overlay.opacity;
+      ctx.translate(overlay.transform.x, overlay.transform.y);
+      ctx.scale(overlay.transform.scale, overlay.transform.scale);
+      ctx.drawImage(overlayImage, 0, 0);
+      ctx.restore();
+    }
 
     activeImageEffectLayers.value.forEach(({ effect, preset }) => {
       const effectCanvas = buildImageEffectCanvas(effect, canvas.width, canvas.height);
@@ -2852,6 +3220,9 @@ const resetSession = () => {
   imageTransform.x = 0;
   imageTransform.y = 0;
   imageTransform.scale = 1;
+  imageOverlays.value = [];
+  activeImageOverlayId.value = null;
+  activeImageDragTarget.value = 'base';
   imageEffects.value = [];
   
   // Reset image dragging state
@@ -3293,6 +3664,7 @@ const initializeLayoutValues = () => {
   // Ensure we're using string percentages for flex basis values
   chatPanelFlexBasis.value = '25%';
   mainContentFlexBasis.value = '75%';
+  utilityPanelWidth.value = 320;
   
   // Ensure consistent size of both panels
   console.log('Layout initialized with main content: 75%, chat panel: 25%');
@@ -3304,6 +3676,8 @@ watch([
   dropZoneWidth,
   dropZoneHeight,
   () => ({ ...imageTransform }),
+  imageOverlays,
+  activeImageOverlayId,
   imageEffects,
   chatOverlays,
   activeChatOverlayId,
@@ -3669,6 +4043,11 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <v-btn v-bind="props" icon="mdi-message-plus-outline" @click="triggerChatFileInput"></v-btn>
           </template>
         </v-tooltip>
+        <v-tooltip text="Add Image Overlay" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn v-bind="props" icon="mdi-image-multiple-outline" @click="triggerImageOverlayInput"></v-btn>
+          </template>
+        </v-tooltip>
         <v-tooltip text="Open Projects" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn v-bind="props" icon="mdi-folder-open-outline" @click="openProjectsManager"></v-btn>
@@ -3907,6 +4286,11 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               <v-tooltip text="Import Chatlog" location="bottom">
                 <template v-slot:activator="{ props }">
                   <v-btn v-bind="props" icon="mdi-message-plus-outline" @click="triggerChatFileInput"></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Add Image Overlay" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn v-bind="props" icon="mdi-image-multiple-outline" @click="triggerImageOverlayInput"></v-btn>
                 </template>
               </v-tooltip>
               <v-tooltip text="Open Projects" location="bottom">
@@ -4884,6 +5268,14 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       accept="image/*" 
       @change="handleFileSelect"
     />
+    <input
+      type="file"
+      ref="imageOverlayInputRef"
+      class="hidden-input"
+      accept="image/*"
+      multiple
+      @change="handleImageOverlayFileSelect"
+    />
     <input 
       type="file" 
       ref="chatFileInputRef"
@@ -4900,8 +5292,218 @@ const preventNativePreviewDrag = (event: DragEvent) => {
     />
 
     <!-- Row takes remaining height and full width. Padding applied here. -->
-    <div class="layout-container pa-2">
-      <div class="main-content" ref="contentAreaRef" :style="{ width: mainContentFlexBasis }">
+    <div class="layout-container pa-2" ref="parentRowRef">
+      <div class="utility-panel" :style="{ width: `${utilityPanelWidth}px` }">
+        <v-sheet class="utility-panel-sheet fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
+          <div class="project-status mb-3">
+            <div class="text-subtitle-2">Project</div>
+            <div class="text-body-2">
+              {{ currentProjectName || 'Unsaved session' }}
+            </div>
+            <div
+              class="text-caption text-medium-emphasis project-status-message"
+              :title="projectStatusMessage"
+            >
+              {{ projectStatusMessage }}
+            </div>
+          </div>
+          <v-sheet
+            v-if="showImageMinimap && droppedImageSrc"
+            class="image-minimap mb-3"
+            border
+            rounded="lg"
+          >
+            <div class="image-minimap-header">
+              <div>
+                <div class="text-subtitle-2">Navigator</div>
+                <div class="text-caption text-medium-emphasis">
+                  Click anywhere in the preview to recenter the screenshot.
+                </div>
+              </div>
+              <v-btn
+                size="x-small"
+                variant="text"
+                icon="mdi-fit-to-screen-outline"
+                @click="resetImageView"
+              ></v-btn>
+            </div>
+            <div
+              ref="minimapRef"
+              class="image-minimap-frame"
+              :style="{ width: `${minimapSize.width}px`, height: `${minimapSize.height}px` }"
+              @click="recenterImageFromMinimap"
+            >
+              <img
+                :src="droppedImageSrc"
+                alt="Navigator preview"
+                class="image-minimap-preview"
+              />
+              <div
+                class="image-minimap-viewport"
+                :style="{
+                  left: `${minimapViewport.left}px`,
+                  top: `${minimapViewport.top}px`,
+                  width: `${minimapViewport.width}px`,
+                  height: `${minimapViewport.height}px`
+                }"
+              ></div>
+            </div>
+          </v-sheet>
+          <div class="d-flex align-center justify-space-between mb-2">
+            <div class="text-subtitle-1">Image Layers</div>
+            <v-btn
+              size="small"
+              variant="tonal"
+              color="primary"
+              prepend-icon="mdi-image-multiple-outline"
+              @click="triggerImageOverlayInput"
+            >
+              Add Image
+            </v-btn>
+          </div>
+          <div class="chat-layer-list mb-3">
+            <v-list density="compact" class="pa-0" bg-color="transparent">
+              <v-list-item
+                :active="activeImageOverlayId === null"
+                rounded="lg"
+                @click="selectImageOverlay(null)"
+              >
+                <template v-slot:prepend>
+                  <v-icon icon="mdi-image-outline" size="small"></v-icon>
+                </template>
+                <v-list-item-title>Base Screenshot</v-list-item-title>
+                <v-list-item-subtitle>
+                  {{ droppedImageSrc ? 'Primary canvas image' : 'No screenshot loaded yet' }}
+                </v-list-item-subtitle>
+                <template v-slot:append>
+                  <v-btn
+                    icon="mdi-fit-to-screen-outline"
+                    size="x-small"
+                    variant="text"
+                    :disabled="!droppedImageSrc"
+                    @click.stop="resetImageView"
+                  ></v-btn>
+                </template>
+              </v-list-item>
+              <v-list-item
+                v-for="overlay in imageOverlays"
+                :key="overlay.id"
+                :active="overlay.id === activeImageOverlayId"
+                class="image-layer-list-item"
+                rounded="lg"
+                @click="selectImageOverlay(overlay.id)"
+              >
+                <template v-slot:prepend>
+                  <div class="image-layer-thumbnail-wrap">
+                    <img
+                      :src="overlay.src"
+                      :alt="overlay.name"
+                      class="image-layer-thumbnail"
+                    />
+                    <div v-if="overlay.isHidden" class="image-layer-thumbnail-badge">
+                      <v-icon icon="mdi-eye-off-outline" size="x-small"></v-icon>
+                    </div>
+                  </div>
+                </template>
+                <div class="image-layer-item-main">
+                  <div class="image-layer-item-name" :title="overlay.name">
+                    {{ overlay.name }}
+                  </div>
+                  <div class="image-layer-item-meta">
+                    Layer {{ imageOverlays.findIndex((item) => item.id === overlay.id) + 1 }} of {{ imageOverlays.length }} · {{ Math.round(overlay.opacity * 100) }}% opacity
+                    <span v-if="overlay.isHidden"> • Hidden</span>
+                    <span v-if="overlay.isLocked"> • Locked</span>
+                  </div>
+                  <div class="image-layer-item-actions">
+                    <v-btn
+                      icon="mdi-arrow-down-bold-outline"
+                      size="x-small"
+                      variant="text"
+                      :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === imageOverlays.length - 1"
+                      @click.stop="moveImageOverlay(overlay.id, 'forward')"
+                    ></v-btn>
+                    <v-btn
+                      icon="mdi-arrow-up-bold-outline"
+                      size="x-small"
+                      variant="text"
+                      :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === 0"
+                      @click.stop="moveImageOverlay(overlay.id, 'backward')"
+                    ></v-btn>
+                    <v-btn
+                      :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
+                      size="x-small"
+                      variant="text"
+                      @click.stop="toggleImageOverlayVisibility(overlay.id)"
+                    ></v-btn>
+                    <v-btn
+                      :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
+                      size="x-small"
+                      variant="text"
+                      @click.stop="toggleImageOverlayLock(overlay.id)"
+                    ></v-btn>
+                    <v-btn
+                      icon="mdi-content-copy"
+                      size="x-small"
+                      variant="text"
+                      @click.stop="duplicateImageOverlay(overlay.id)"
+                    ></v-btn>
+                    <v-btn
+                      icon="mdi-delete-outline"
+                      size="x-small"
+                      variant="text"
+                      color="error"
+                      @click.stop="removeImageOverlay(overlay.id)"
+                    ></v-btn>
+                  </div>
+                </div>
+              </v-list-item>
+            </v-list>
+            <div v-if="imageOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
+              Add PNG, JPG, WEBP, or any browser-supported image to stack props, decals, or cutouts over the screenshot.
+            </div>
+          </div>
+          <v-sheet
+            v-if="activeImageOverlay"
+            class="censored-region-panel mb-3"
+            border
+            rounded="lg"
+          >
+            <div class="d-flex align-center justify-space-between mb-2">
+              <div>
+                <div class="text-subtitle-2">Selected Image Layer</div>
+                <div class="text-caption text-medium-emphasis">
+                  Drag, resize with the mouse wheel, or use arrows and +/- while Image Drag is enabled.
+                </div>
+              </div>
+              <div class="selected-image-layer-name" :title="activeImageOverlay.name">
+                {{ activeImageOverlay.name }}
+              </div>
+            </div>
+            <div class="text-caption text-medium-emphasis mb-1">Opacity</div>
+            <v-slider
+              v-model="activeImageOverlay.opacity"
+              min="0.05"
+              max="1"
+              step="0.01"
+              hide-details
+              color="primary"
+            ></v-slider>
+            <div class="d-flex align-center justify-space-between text-caption mb-2">
+              <span>{{ Math.round(activeImageOverlay.opacity * 100) }}%</span>
+              <v-btn
+                size="x-small"
+                variant="text"
+                prepend-icon="mdi-fit-to-screen-outline"
+                @click="resetActiveImageOverlayView"
+              >
+                Reset Layer
+              </v-btn>
+            </div>
+          </v-sheet>
+        </v-sheet>
+      </div>
+
+      <div class="main-content" ref="contentAreaRef">
         <!-- Add aspect ratio container to enforce proper ratio -->
         <div class="aspect-ratio-container" :style="aspectRatioContainerStyle">
           <v-sheet 
@@ -4938,6 +5540,20 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               @dragstart="preventNativePreviewDrag"
               @mousedown="handleImageMouseDown"
               @dblclick="enableImageDragFromCanvas"
+            />
+            <img
+              v-for="overlay in imageOverlays"
+              v-show="droppedImageSrc && !overlay.isHidden"
+              :key="overlay.id"
+              :src="overlay.src"
+              :alt="overlay.name"
+              class="dropped-image image-overlay-layer"
+              :style="getImageOverlayStyles(overlay) as CSSProperties"
+              draggable="false"
+              @dragstart="preventNativePreviewDrag"
+              @mousedown.stop="handleImageOverlayMouseDown($event, overlay.id)"
+              @dblclick.stop.prevent="enableImageOverlayDragFromCanvas($event, overlay.id)"
+              @wheel="handleImageOverlayWheel($event, overlay.id)"
             />
             <div
               v-for="preview in activeImageEffectPreviews"
@@ -4999,57 +5615,6 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       <!-- Right side chatlog panel -->
       <div class="chatlog-panel" ref="chatPanelRef" :style="{ width: chatPanelFlexBasis }">
         <v-sheet class="chatlog-panel-sheet fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
-          <div class="project-status mb-3">
-            <div class="text-subtitle-2">Project</div>
-            <div class="text-body-2">
-              {{ currentProjectName || 'Unsaved session' }}
-            </div>
-            <div class="text-caption text-medium-emphasis">
-              {{ projectStatusMessage }}
-            </div>
-          </div>
-          <v-sheet
-            v-if="showImageMinimap && droppedImageSrc"
-            class="image-minimap mb-3"
-            border
-            rounded="lg"
-          >
-            <div class="image-minimap-header">
-              <div>
-                <div class="text-subtitle-2">Navigator</div>
-                <div class="text-caption text-medium-emphasis">
-                  Click anywhere in the preview to recenter the screenshot.
-                </div>
-              </div>
-              <v-btn
-                size="x-small"
-                variant="text"
-                icon="mdi-fit-to-screen-outline"
-                @click="resetImageView"
-              ></v-btn>
-            </div>
-            <div
-              ref="minimapRef"
-              class="image-minimap-frame"
-              :style="{ width: `${minimapSize.width}px`, height: `${minimapSize.height}px` }"
-              @click="recenterImageFromMinimap"
-            >
-              <img
-                :src="droppedImageSrc"
-                alt="Navigator preview"
-                class="image-minimap-preview"
-              />
-              <div
-                class="image-minimap-viewport"
-                :style="{
-                  left: `${minimapViewport.left}px`,
-                  top: `${minimapViewport.top}px`,
-                  width: `${minimapViewport.width}px`,
-                  height: `${minimapViewport.height}px`
-                }"
-              ></div>
-            </div>
-          </v-sheet>
           <div class="d-flex align-center justify-space-between mb-2">
             <div class="text-subtitle-1">Chat Layers</div>
             <v-btn
@@ -5341,6 +5906,110 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   height: 100%;
   object-fit: contain; /* Scale image while preserving aspect ratio */
   z-index: 0;
+}
+
+.image-overlay-layer {
+  width: auto;
+  height: auto;
+  object-fit: initial;
+}
+
+.image-layer-thumbnail-wrap {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.image-layer-thumbnail {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  background:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.04) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.04) 75%),
+    linear-gradient(45deg, rgba(255, 255, 255, 0.04) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.04) 75%);
+  background-position: 0 0, 6px 6px;
+  background-size: 12px 12px;
+}
+
+.image-layer-thumbnail-badge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(19, 18, 19, 0.9);
+  color: #f3f4f6;
+}
+
+.image-layer-list-item {
+  align-items: flex-start;
+}
+
+.image-layer-list-item :deep(.v-list-item__prepend) {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+.image-layer-list-item :deep(.v-list-item__content) {
+  min-width: 0;
+}
+
+.image-layer-item-main {
+  min-width: 0;
+  width: 100%;
+}
+
+.image-layer-item-name {
+  font-size: 0.98rem;
+  line-height: 1.25;
+  color: #f3f4f6;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.image-layer-item-meta {
+  margin-top: 2px;
+  font-size: 0.76rem;
+  line-height: 1.35;
+  color: rgba(243, 244, 246, 0.72);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.image-layer-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 6px;
+  margin-right: -6px;
+}
+
+.selected-image-layer-name {
+  max-width: 128px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(var(--v-theme-primary), 0.14);
+  color: #f3f4f6;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .image-minimap {
@@ -5641,26 +6310,41 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   height: 100%;
   overflow: hidden;
   position: relative; /* Ensure proper stacking context */
+  gap: 0;
+}
+
+.utility-panel {
+  height: 100%;
+  padding: 4px;
+  flex-shrink: 0;
 }
 
 .main-content {
   height: 100%;
   display: flex;
+  flex: 1 1 auto;
   justify-content: center;
   align-items: center;
   padding: 4px;
+  min-width: 0;
 }
 
 .chatlog-panel {
   height: 100%;
   padding: 4px;
+  flex-shrink: 0;
 }
 
+.utility-panel-sheet,
 .chatlog-panel-sheet {
   background: #131213 !important;
   color: #f3f4f6 !important;
 }
 
+.utility-panel-sheet :deep(.text-medium-emphasis),
+.utility-panel-sheet .text-medium-emphasis,
+.utility-panel-sheet .text-caption,
+.utility-panel-sheet .text-body-2,
 .chatlog-panel-sheet :deep(.text-medium-emphasis),
 .chatlog-panel-sheet .text-medium-emphasis,
 .chatlog-panel-sheet .text-caption,
@@ -5668,6 +6352,8 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   color: rgba(243, 244, 246, 0.78) !important;
 }
 
+.utility-panel-sheet .text-subtitle-2,
+.utility-panel-sheet .text-subtitle-1,
 .chatlog-panel-sheet .text-subtitle-2,
 .chatlog-panel-sheet .text-subtitle-1 {
   color: #f3f4f6 !important;
@@ -5876,6 +6562,15 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   border-radius: 8px;
   padding: 12px;
   background: rgba(255, 255, 255, 0.02);
+}
+
+.project-status-message {
+  display: block;
+  min-height: 1.35em;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .aspect-ratio-container {

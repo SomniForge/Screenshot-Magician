@@ -50,3 +50,4 @@ coverage/
 *.tsbuildinfo
 .cache
 frontend/public/ads.txt
+DOMAIN_CUTOVER.md

@@ -3,11 +3,44 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.20-beta'; // Incremented version
+const version = 'v2.0.22-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.22-beta',
+        date: 'APR-20-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added stackable user image layers with per-layer positioning, scaling, opacity, duplication, visibility, locking, persistence, and export support',
+                    'Added a dedicated left utility rail so navigator and image-layer controls no longer compete with the chat editor for sidebar space'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved image-layer management with automatic fit-to-canvas placement on import, thumbnail previews, readable wrapped layer labels, and layer reordering controls',
+                    'Improved canvas targeting so only the selected image element responds to drag and resize input, with double-click canvas selection for image layers',
+                    'Improved project status presentation by keeping autosave state messaging on a stable single line instead of shifting the sidebar layout'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.21-beta',
+        date: 'APR-20-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added Discord-friendly Open Graph metadata and a dedicated social preview card so shared links now render a proper embed instead of an empty preview'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.20-beta',
         date: 'APR-19-2026',
