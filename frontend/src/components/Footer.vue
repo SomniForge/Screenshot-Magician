@@ -3,11 +3,36 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.15-beta'; // Incremented version
+const version = 'v2.0.16-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.16-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added layer management controls for chat overlays, including duplicate, hide/show, and lock actions directly inside the Chat Layers panel'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved canvas interaction by allowing drag mode to be enabled from the canvas itself with double-click shortcuts for the screenshot and chat overlays',
+                    'Improved chat overlay handling so image dragging no longer drops when the cursor passes across chat elements during a drag session'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed chat double-click activation conflicts caused by layer selection rerendering before the browser could complete the double-click gesture'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.15-beta',
         date: 'APR-19-2026',

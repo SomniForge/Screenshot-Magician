@@ -82,6 +82,8 @@ interface ChatOverlay {
   censoredRegions: CensoredRegion[];
   manualColorRegions: ManualColorRegion[];
   lineWidth: number;
+  isHidden: boolean;
+  isLocked: boolean;
 }
 
 interface EditorStateSnapshot {
@@ -1176,7 +1178,9 @@ const cloneChatOverlay = (overlay: Partial<ChatOverlay>, index: number): ChatOve
   },
   censoredRegions: Array.isArray(overlay.censoredRegions) ? overlay.censoredRegions : [],
   manualColorRegions: Array.isArray(overlay.manualColorRegions) ? overlay.manualColorRegions : [],
-  lineWidth: overlay.lineWidth || DEFAULT_CHAT_LINE_WIDTH
+  lineWidth: overlay.lineWidth || DEFAULT_CHAT_LINE_WIDTH,
+  isHidden: overlay.isHidden ?? false,
+  isLocked: overlay.isLocked ?? false
 });
 
 const createEditorSnapshot = (): EditorStateSnapshot => ({
@@ -1309,7 +1313,7 @@ const nudgeImage = (deltaX: number, deltaY: number) => {
 };
 
 const nudgeActiveChatOverlay = (deltaX: number, deltaY: number) => {
-  if (!activeChatOverlay.value) return false;
+  if (!activeChatOverlay.value || activeChatOverlay.value.isLocked) return false;
 
   activeChatOverlay.value.transform.x += deltaX;
   activeChatOverlay.value.transform.y += deltaY;
@@ -1332,7 +1336,7 @@ const zoomImage = (direction: 'in' | 'out') => {
 };
 
 const zoomActiveChatOverlay = (direction: 'in' | 'out') => {
-  if (!activeChatOverlay.value) return false;
+  if (!activeChatOverlay.value || activeChatOverlay.value.isLocked) return false;
 
   const scaleAmount = 0.1;
   const minScale = 0.1;
@@ -1869,7 +1873,6 @@ const selectChatOverlay = (overlayId: string | null) => {
   selectedText.startOffset = 0;
   selectedText.endOffset = 0;
   selectedText.text = '';
-  renderKey.value++;
 };
 
 const startNewChatLayer = () => {
@@ -1891,6 +1894,53 @@ const removeChatOverlay = (overlayId: string) => {
   if (activeChatOverlayId.value === overlayId) {
     const nextOverlay = chatOverlays.value[Math.max(0, overlayIndex - 1)] ?? chatOverlays.value[0] ?? null;
     selectChatOverlay(nextOverlay?.id ?? null);
+  }
+
+  renderKey.value++;
+};
+
+const duplicateChatOverlay = (overlayId: string) => {
+  const sourceOverlay = chatOverlays.value.find((overlay) => overlay.id === overlayId);
+  if (!sourceOverlay) return;
+
+  const overlayIndex = chatOverlays.value.length;
+  const duplicatedOverlay = cloneChatOverlay({
+    ...sourceOverlay,
+    id: createOverlayId(),
+    name: `${sourceOverlay.name} Copy`,
+    transform: {
+      ...sourceOverlay.transform,
+      x: sourceOverlay.transform.x + 16,
+      y: sourceOverlay.transform.y + 16
+    }
+  }, overlayIndex);
+
+  chatOverlays.value.push(duplicatedOverlay);
+  selectChatOverlay(duplicatedOverlay.id);
+  renderKey.value++;
+};
+
+const toggleChatOverlayVisibility = (overlayId: string) => {
+  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay) return;
+
+  overlay.isHidden = !overlay.isHidden;
+
+  if (overlay.isHidden && activeChatOverlayId.value === overlayId) {
+    syncEditorFromActiveOverlay();
+  }
+
+  renderKey.value++;
+};
+
+const toggleChatOverlayLock = (overlayId: string) => {
+  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay) return;
+
+  overlay.isLocked = !overlay.isLocked;
+
+  if (overlay.isLocked && isChatPanning.value && activeChatOverlayId.value === overlayId) {
+    handleChatMouseUpOrLeave();
   }
 
   renderKey.value++;
@@ -2155,6 +2205,8 @@ const handleImageMouseDown = (event: MouseEvent) => {
   panStartImagePos.y = imageTransform.y;
   // Add a class to body to prevent text selection during drag
   document.body.style.userSelect = 'none';
+  document.addEventListener('mousemove', handleImageMouseMove);
+  document.addEventListener('mouseup', handleImageMouseUpOrLeave);
 };
 
 const handleImageMouseMove = (event: MouseEvent) => {
@@ -2170,6 +2222,9 @@ const handleImageMouseUpOrLeave = () => {
     isPanning.value = false;
     document.body.style.userSelect = ''; // Re-enable text selection
   }
+
+  document.removeEventListener('mousemove', handleImageMouseMove);
+  document.removeEventListener('mouseup', handleImageMouseUpOrLeave);
 };
 
 // --- Image Zoom Handler ---
@@ -2197,21 +2252,32 @@ const toggleImageDrag = () => {
   }
 };
 
+const enableImageDragFromCanvas = (event: MouseEvent) => {
+  if (!droppedImageSrc.value) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  isImageDraggingEnabled.value = true;
+  isChatDraggingEnabled.value = false;
+};
+
 // --- Chat Dragging Handlers ---
 const handleChatMouseDown = (event: MouseEvent, overlayId: string) => {
   selectChatOverlay(overlayId);
 
   const overlay = chatOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay || overlay.parsedLines.length === 0 || !isChatDraggingEnabled.value) return;
+  if (!overlay || overlay.parsedLines.length === 0) return;
+
+  event.stopPropagation();
+
+  if (overlay.isLocked || !isChatDraggingEnabled.value) return;
   
   // Don't allow chat dragging if image dragging is active and in progress
   if (isImageDraggingEnabled.value && isPanning.value) {
-    event.stopPropagation();
     return;
   }
   
   event.preventDefault();
-  event.stopPropagation(); // Stop event from propagating to image
   isChatPanning.value = true;
   chatPanStart.x = event.clientX;
   chatPanStart.y = event.clientY;
@@ -2250,7 +2316,7 @@ const handleChatMouseUpOrLeave = (event?: MouseEvent) => {
 // --- Chat Zoom Handler ---
 const handleChatWheel = (event: WheelEvent, overlayId: string) => {
   const overlay = chatOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay || !isChatDraggingEnabled.value || overlay.parsedLines.length === 0) return;
+  if (!overlay || overlay.isLocked || !isChatDraggingEnabled.value || overlay.parsedLines.length === 0) return;
 
   selectChatOverlay(overlayId);
   event.preventDefault();
@@ -2272,6 +2338,17 @@ const toggleChatDrag = () => {
   if (isChatDraggingEnabled.value && isImageDraggingEnabled.value) {
     isImageDraggingEnabled.value = false; // Disable image drag if enabling chat drag
   }
+};
+
+const enableChatDragFromCanvas = (event: MouseEvent, overlayId: string) => {
+  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay || overlay.isLocked) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  selectChatOverlay(overlayId);
+  isChatDraggingEnabled.value = true;
+  isImageDraggingEnabled.value = false;
 };
 
 // --- Chat Panel Resize Handlers ---
@@ -2376,8 +2453,13 @@ const getChatStyles = (overlay: ChatOverlay) => {
     pointerEvents: 'auto' as const,
     wordWrap: 'break-word' as const,
     whiteSpace: 'pre-wrap' as const,
-    cursor: isChatDraggingEnabled.value ? (isActiveOverlay && isChatPanning.value ? 'grabbing' : 'grab') : 'pointer',
-    outline: isActiveOverlay ? '1px dashed rgba(66, 165, 245, 0.9)' : 'none',
+    opacity: overlay.isHidden ? '0.45' : '1',
+    cursor: overlay.isLocked
+      ? 'not-allowed'
+      : isChatDraggingEnabled.value
+        ? (isActiveOverlay && isChatPanning.value ? 'grabbing' : 'grab')
+        : 'pointer',
+    outline: isActiveOverlay ? `1px dashed ${overlay.isLocked ? 'rgba(239, 83, 80, 0.9)' : 'rgba(66, 165, 245, 0.9)'}` : 'none',
     outlineOffset: '2px',
   };
 };
@@ -3135,6 +3217,8 @@ onUnmounted(() => {
   if (projectAutosaveTimer) {
     clearTimeout(projectAutosaveTimer);
   }
+  document.removeEventListener('mousemove', handleImageMouseMove);
+  document.removeEventListener('mouseup', handleImageMouseUpOrLeave);
   window.removeEventListener('beforeunload', handleBeforeUnload);
   window.removeEventListener('keydown', handleEditorHistoryKeydown);
   unsavedNavigationStore.reset();
@@ -4637,9 +4721,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               draggable="false"
               @dragstart="preventNativePreviewDrag"
               @mousedown="handleImageMouseDown"
-              @mousemove="handleImageMouseMove"
-              @mouseup="handleImageMouseUpOrLeave"
-              @mouseleave="handleImageMouseUpOrLeave"
+              @dblclick="enableImageDragFromCanvas"
             />
             <div
               v-for="preview in activeImageEffectPreviews"
@@ -4658,25 +4740,31 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <!-- Chat Overlay with fixed-width wrapping -->
             <div
               v-for="overlay in chatOverlays"
-              v-show="overlay.parsedLines.length > 0 && droppedImageSrc"
+              v-show="overlay.parsedLines.length > 0 && droppedImageSrc && !overlay.isHidden"
               :key="`${overlay.id}-${renderKey}`"
               class="chat-overlay"
-              @mousedown="handleChatMouseDown($event, overlay.id)"
+              @mousedown.stop="handleChatMouseDown($event, overlay.id)"
+              @dblclick.stop.prevent="enableChatDragFromCanvas($event, overlay.id)"
               @mousemove="handleChatMouseMove"
               @mouseup="handleChatMouseUpOrLeave"
               @wheel="handleChatWheel($event, overlay.id)"
               @dragstart="preventNativePreviewDrag"
               :style="getChatStyles(overlay)"
             >
-              <div class="chat-lines-container">
+              <div
+                class="chat-lines-container"
+                @dblclick.stop.prevent="enableChatDragFromCanvas($event, overlay.id)"
+              >
                 <div
                   v-for="(line, index) in overlay.parsedLines"
                   :key="line.id"
                   class="chat-line"
                   :style="{ width: `${overlay.lineWidth}px` }"
+                  @dblclick.stop.prevent="enableChatDragFromCanvas($event, overlay.id)"
                 >
                   <span
                     :class="['chat-text', { 'chat-text-black-bars': showBlackBars }]"
+                    @dblclick.stop.prevent="enableChatDragFromCanvas($event, overlay.id)"
                     v-html="buildStyledLineHtml(overlay, index, line.text)"
                   ></span>
                 </div>
@@ -4726,18 +4814,42 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                 @click="selectChatOverlay(overlay.id)"
               >
                 <template v-slot:prepend>
-                  <v-icon icon="mdi-message-text-outline" size="small"></v-icon>
+                  <v-icon :icon="overlay.isHidden ? 'mdi-message-off-outline' : 'mdi-message-text-outline'" size="small"></v-icon>
                 </template>
                 <v-list-item-title>{{ overlay.name }}</v-list-item-title>
-                <v-list-item-subtitle>{{ overlay.parsedLines.length }} lines</v-list-item-subtitle>
+                <v-list-item-subtitle>
+                  {{ overlay.parsedLines.length }} lines
+                  <span v-if="overlay.isHidden"> • Hidden</span>
+                  <span v-if="overlay.isLocked"> • Locked</span>
+                </v-list-item-subtitle>
                 <template v-slot:append>
-                  <v-btn
-                    icon="mdi-delete-outline"
-                    size="x-small"
-                    variant="text"
-                    color="error"
-                    @click.stop="removeChatOverlay(overlay.id)"
-                  ></v-btn>
+                  <div class="d-flex align-center ga-1">
+                    <v-btn
+                      :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
+                      size="x-small"
+                      variant="text"
+                      @click.stop="toggleChatOverlayVisibility(overlay.id)"
+                    ></v-btn>
+                    <v-btn
+                      :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
+                      size="x-small"
+                      variant="text"
+                      @click.stop="toggleChatOverlayLock(overlay.id)"
+                    ></v-btn>
+                    <v-btn
+                      icon="mdi-content-copy"
+                      size="x-small"
+                      variant="text"
+                      @click.stop="duplicateChatOverlay(overlay.id)"
+                    ></v-btn>
+                    <v-btn
+                      icon="mdi-delete-outline"
+                      size="x-small"
+                      variant="text"
+                      color="error"
+                      @click.stop="removeChatOverlay(overlay.id)"
+                    ></v-btn>
+                  </div>
                 </template>
               </v-list-item>
             </v-list>
