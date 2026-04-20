@@ -8,8 +8,10 @@ import Cookies from 'js-cookie';
 import { createEditorThemeDefinition, editorThemeFamilies, editorThemePresets } from '@/plugins/vuetify';
 import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useAnalytics } from '@/composables/useAnalytics';
+import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
 
 const chatlogText = ref('');
+const unsavedNavigationStore = useUnsavedNavigationStore();
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
 const isDraggingOverDropZone = ref(false); // Renamed from isDragging for clarity
 const dropZoneWidth = ref<number | null>(800); // Default width
@@ -174,6 +176,7 @@ const PROJECTS_DB_VERSION = 1;
 const TUTORIAL_DISMISSED_COOKIE = 'magicianTutorialDismissed';
 const CUSTOM_THEMES_STORAGE_KEY = 'magicianCustomThemes';
 const ACTIVE_THEME_STORAGE_KEY = 'magicianActiveTheme';
+const EDITOR_STATE_STORAGE_KEY = 'magicianEditorState';
 
 const chatOverlays = ref<ChatOverlay[]>([]);
 const activeChatOverlayId = ref<string | null>(null);
@@ -1136,6 +1139,14 @@ const markCurrentStateAsSaved = (snapshot: EditorStateSnapshot = createEditorSna
 const hasUnsavedChanges = computed(() =>
   getSnapshotSignature() !== lastSavedSnapshotSignature.value
 );
+
+const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+  if (!unsavedNavigationStore.shouldWarnBeforeLeaving) return;
+
+  const message = unsavedNavigationStore.getBeforeUnloadMessage();
+  event.preventDefault();
+  event.returnValue = message;
+};
 
 const pendingActionDescription = computed(() => {
   if (!pendingEditorAction.value) return '';
@@ -2539,14 +2550,22 @@ const handleTextSelection = () => {
 
 // Save editor state to cookie
 const saveEditorState = () => {
+  if (typeof window === 'undefined') return;
+
   const state = toSerializableSnapshot(createEditorSnapshot());
-  delete (state as Partial<EditorStateSnapshot>).droppedImageSrc;
-  Cookies.set('editorState', JSON.stringify(state), { expires: 365 });
+
+  try {
+    window.localStorage.setItem(EDITOR_STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.error('Error saving editor state:', error);
+  }
 };
 
 // Load editor state from cookie
 const loadEditorState = () => {
-  const savedState = Cookies.get('editorState');
+  if (typeof window === 'undefined') return;
+
+  const savedState = window.localStorage.getItem(EDITOR_STATE_STORAGE_KEY) || Cookies.get('editorState');
   if (savedState) {
     try {
       const state = JSON.parse(savedState);
@@ -2570,10 +2589,14 @@ const loadEditorState = () => {
           chatOverlays: [migratedOverlay],
           activeChatOverlayId: migratedOverlay.id
         });
+        window.localStorage.setItem(EDITOR_STATE_STORAGE_KEY, JSON.stringify(toSerializableSnapshot(createEditorSnapshot())));
+        Cookies.remove('editorState');
         return;
       }
 
       applyEditorSnapshot(state);
+      window.localStorage.setItem(EDITOR_STATE_STORAGE_KEY, JSON.stringify(toSerializableSnapshot(createEditorSnapshot())));
+      Cookies.remove('editorState');
     } catch (error) {
       console.error('Error loading editor state:', error);
     }
@@ -2663,6 +2686,8 @@ watch([
 
 // Load saved state when component mounts
 onMounted(() => {
+  unsavedNavigationStore.setEditorMounted(true);
+  window.addEventListener('beforeunload', handleBeforeUnload);
   loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
@@ -2686,8 +2711,14 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload);
+  unsavedNavigationStore.reset();
   handleChatMouseUpOrLeave();
 });
+
+watch(hasUnsavedChanges, (value) => {
+  unsavedNavigationStore.setHasUnsavedChanges(value);
+}, { immediate: true });
 
 watch(chatLineWidth, (newValue) => {
   if (!activeChatOverlay.value) return;

@@ -3,11 +3,30 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.13-beta'; // Incremented version
+const version = 'v2.0.14-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.14-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'improved',
+                items: [
+                    'Added leave-page protection for unsaved work when navigating with in-app links, external links, browser reload, tab close, or address bar changes',
+                    'Improved session persistence so reopening the editor restores the full canvas session consistently instead of returning only the chat editor state'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed inconsistent session restore behavior where chat overlays persisted after reload but the dropped screenshot canvas came back empty'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.13-beta',
         date: 'APR-19-2026',

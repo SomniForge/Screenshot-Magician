@@ -1,5 +1,6 @@
 // frontend/src/router/index.ts
 import { createRouter, createWebHistory } from 'vue-router'
+import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation'
 
 
 // Home View component
@@ -36,6 +37,15 @@ const router = createRouter({
       component: PrivacyPolicy // Point '/privacy' to our Privacy Policy
     }
   ]
+})
+
+router.beforeEach((to, from) => {
+  if (to.fullPath === from.fullPath) {
+    return true
+  }
+
+  const unsavedNavigationStore = useUnsavedNavigationStore()
+  return unsavedNavigationStore.confirmNavigation()
 })
 
 export default router
