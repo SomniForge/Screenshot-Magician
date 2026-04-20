@@ -5360,7 +5360,19 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
 .censored-region-panel {
   padding: 10px;
-  background: rgba(var(--v-theme-surface), 0.6);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.censored-region-panel .text-subtitle-2,
+.censored-region-panel .text-body-2 {
+  color: #f3f4f6 !important;
+}
+
+.censored-region-panel .text-caption,
+.censored-region-panel .text-medium-emphasis,
+.censored-region-panel :deep(.text-medium-emphasis) {
+  color: rgba(243, 244, 246, 0.78) !important;
 }
 
 .censored-region-list {

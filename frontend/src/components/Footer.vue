@@ -3,11 +3,35 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.17-beta'; // Incremented version
+const version = 'v2.0.19-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.19-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed additional light-theme readability issues in the editor sidebar by aligning the Censored Selections panel with the same dark subsection styling used by the Project and Navigator areas'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.18-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed low-contrast helper text on dark custom surfaces when using light theme variants, improving readability in the editor sidebar navigator and home page ad rail'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.17-beta',
         date: 'APR-19-2026',
