@@ -13,6 +13,7 @@ import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
 const chatlogText = ref('');
 const unsavedNavigationStore = useUnsavedNavigationStore();
 const droppedImageSrc = ref<string | null>(null); // To store the image data URL
+const imageElementRef = ref<HTMLImageElement | null>(null);
 const isDraggingOverDropZone = ref(false); // Renamed from isDragging for clarity
 const dropZoneWidth = ref<number | null>(800); // Default width
 const dropZoneHeight = ref<number | null>(600); // Default height
@@ -135,6 +136,12 @@ interface PortableProjectFile {
   };
 }
 
+interface PersistedEditorSession {
+  snapshot: EditorStateSnapshot;
+  currentProjectId: string | null;
+  currentProjectName: string;
+}
+
 interface ImageEffectLayer {
   presetId: string;
   opacity: number;
@@ -216,6 +223,7 @@ const TUTORIAL_DISMISSED_COOKIE = 'magicianTutorialDismissed';
 const CUSTOM_THEMES_STORAGE_KEY = 'magicianCustomThemes';
 const ACTIVE_THEME_STORAGE_KEY = 'magicianActiveTheme';
 const EDITOR_STATE_STORAGE_KEY = 'magicianEditorState';
+const SHOW_NAVIGATOR_STORAGE_KEY = 'magicianShowNavigator';
 
 const chatOverlays = ref<ChatOverlay[]>([]);
 const activeChatOverlayId = ref<string | null>(null);
@@ -238,6 +246,7 @@ const showEffectsDialog = ref(false);
 const showSettingsDialog = ref(false);
 const showKeyboardShortcutsDialog = ref(false);
 const showTutorialDialog = ref(false);
+const showNavigator = ref(true);
 const pendingProjectName = ref('');
 const isProjectsLoading = ref(false);
 const showColorDialog = ref(false);
@@ -283,6 +292,7 @@ const chatPanStartPos = reactive({ x: 0, y: 0 });
 const contentAreaRef = ref<HTMLElement | null>(null); // Reference to content area div
 const dropzoneScale = ref(1); // Scale factor for the dropzone to fit screen
 const isScaledDown = ref(false); // Flag to track if the dropzone is scaled down
+const minimapRef = ref<HTMLElement | null>(null);
 
 // Add to the script setup section near the other state variables
 const chatLineWidth = ref(DEFAULT_CHAT_LINE_WIDTH);
@@ -687,6 +697,86 @@ const imageStyle = computed(() => ({
   cursor: isImageDraggingEnabled.value ? (isPanning.value ? 'grabbing' : 'grab') : 'default',
   transition: isPanning.value ? 'none' : 'transform 0.1s ease-out' // Smooth transition only when not panning
 }));
+
+const imageFitDimensions = computed(() => {
+  const zoneWidth = dropZoneWidth.value || 800;
+  const zoneHeight = dropZoneHeight.value || 600;
+  const naturalWidth = imageElementRef.value?.naturalWidth || zoneWidth;
+  const naturalHeight = imageElementRef.value?.naturalHeight || zoneHeight;
+
+  if (naturalWidth <= 0 || naturalHeight <= 0) {
+    return {
+      width: zoneWidth,
+      height: zoneHeight,
+      offsetX: 0,
+      offsetY: 0
+    };
+  }
+
+  const zoneAspect = zoneWidth / zoneHeight;
+  const imageAspect = naturalWidth / naturalHeight;
+
+  const width = imageAspect > zoneAspect ? zoneWidth : zoneHeight * imageAspect;
+  const height = imageAspect > zoneAspect ? zoneWidth / imageAspect : zoneHeight;
+
+  return {
+    width,
+    height,
+    offsetX: (zoneWidth - width) / 2,
+    offsetY: (zoneHeight - height) / 2
+  };
+});
+
+const minimapSize = computed(() => {
+  const maxWidth = 180;
+  const maxHeight = 120;
+  const { width, height } = imageFitDimensions.value;
+
+  if (width <= 0 || height <= 0) {
+    return { width: maxWidth, height: maxHeight };
+  }
+
+  const scale = Math.min(maxWidth / width, maxHeight / height);
+  return {
+    width: Math.max(96, Math.round(width * scale)),
+    height: Math.max(64, Math.round(height * scale))
+  };
+});
+
+const minimapViewport = computed(() => {
+  const zoneWidth = dropZoneWidth.value || 800;
+  const zoneHeight = dropZoneHeight.value || 600;
+  const centerX = zoneWidth / 2;
+  const centerY = zoneHeight / 2;
+  const { width, height, offsetX, offsetY } = imageFitDimensions.value;
+  const scale = imageTransform.scale || 1;
+
+  const visibleLeft = ((((0 - imageTransform.x - centerX) / scale) + centerX) - offsetX);
+  const visibleTop = ((((0 - imageTransform.y - centerY) / scale) + centerY) - offsetY);
+  const visibleRight = ((((zoneWidth - imageTransform.x - centerX) / scale) + centerX) - offsetX);
+  const visibleBottom = ((((zoneHeight - imageTransform.y - centerY) / scale) + centerY) - offsetY);
+
+  const clampedLeft = Math.max(0, Math.min(width, visibleLeft));
+  const clampedTop = Math.max(0, Math.min(height, visibleTop));
+  const clampedRight = Math.max(0, Math.min(width, visibleRight));
+  const clampedBottom = Math.max(0, Math.min(height, visibleBottom));
+
+  const minimapScaleX = minimapSize.value.width / width;
+  const minimapScaleY = minimapSize.value.height / height;
+
+  return {
+    left: clampedLeft * minimapScaleX,
+    top: clampedTop * minimapScaleY,
+    width: Math.max(12, (clampedRight - clampedLeft) * minimapScaleX),
+    height: Math.max(12, (clampedBottom - clampedTop) * minimapScaleY)
+  };
+});
+
+const showImageMinimap = computed(() =>
+  showNavigator.value
+  && Boolean(droppedImageSrc.value)
+  && (imageTransform.scale > 1 || imageTransform.x !== 0 || imageTransform.y !== 0)
+);
 
 const createOverlayId = () =>
   `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1333,6 +1423,31 @@ const zoomImage = (direction: 'in' | 'out') => {
     : Math.max(minScale, imageTransform.scale - scaleAmount);
 
   return true;
+};
+
+const resetImageView = () => {
+  imageTransform.x = 0;
+  imageTransform.y = 0;
+  imageTransform.scale = 1;
+};
+
+const recenterImageFromMinimap = (event: MouseEvent) => {
+  if (!droppedImageSrc.value || !minimapRef.value) return;
+
+  const bounds = minimapRef.value.getBoundingClientRect();
+  const clickX = event.clientX - bounds.left;
+  const clickY = event.clientY - bounds.top;
+  const { width, height, offsetX, offsetY } = imageFitDimensions.value;
+  const zoneWidth = dropZoneWidth.value || 800;
+  const zoneHeight = dropZoneHeight.value || 600;
+  const centerX = zoneWidth / 2;
+  const centerY = zoneHeight / 2;
+
+  const targetX = (clickX / bounds.width) * width;
+  const targetY = (clickY / bounds.height) * height;
+
+  imageTransform.x = -imageTransform.scale * ((offsetX + targetX) - centerX);
+  imageTransform.y = -imageTransform.scale * ((offsetY + targetY) - centerY);
 };
 
 const zoomActiveChatOverlay = (direction: 'in' | 'out') => {
@@ -3050,7 +3165,11 @@ const handleTextSelection = () => {
 const saveEditorState = () => {
   if (typeof window === 'undefined') return;
 
-  const state = toSerializableSnapshot(createEditorSnapshot());
+  const state: PersistedEditorSession = {
+    snapshot: toSerializableSnapshot(createEditorSnapshot()),
+    currentProjectId: currentProjectId.value,
+    currentProjectName: currentProjectName.value
+  };
 
   try {
     window.localStorage.setItem(EDITOR_STATE_STORAGE_KEY, JSON.stringify(state));
@@ -3066,7 +3185,9 @@ const loadEditorState = () => {
   const savedState = window.localStorage.getItem(EDITOR_STATE_STORAGE_KEY) || Cookies.get('editorState');
   if (savedState) {
     try {
-      const state = JSON.parse(savedState);
+      const parsedState = JSON.parse(savedState) as Partial<PersistedEditorSession & EditorStateSnapshot>;
+      const state = parsedState.snapshot ?? parsedState;
+
       if (!Array.isArray(state.chatOverlays) && state.chatlogText) {
         const migratedOverlay: ChatOverlay = {
           id: createOverlayId(),
@@ -3087,13 +3208,17 @@ const loadEditorState = () => {
           chatOverlays: [migratedOverlay],
           activeChatOverlayId: migratedOverlay.id
         });
-        window.localStorage.setItem(EDITOR_STATE_STORAGE_KEY, JSON.stringify(toSerializableSnapshot(createEditorSnapshot())));
+        currentProjectId.value = typeof parsedState.currentProjectId === 'string' ? parsedState.currentProjectId : null;
+        currentProjectName.value = typeof parsedState.currentProjectName === 'string' ? parsedState.currentProjectName : '';
+        saveEditorState();
         Cookies.remove('editorState');
         return;
       }
 
       applyEditorSnapshot(state);
-      window.localStorage.setItem(EDITOR_STATE_STORAGE_KEY, JSON.stringify(toSerializableSnapshot(createEditorSnapshot())));
+      currentProjectId.value = typeof parsedState.currentProjectId === 'string' ? parsedState.currentProjectId : null;
+      currentProjectName.value = typeof parsedState.currentProjectName === 'string' ? parsedState.currentProjectName : '';
+      saveEditorState();
       Cookies.remove('editorState');
     } catch (error) {
       console.error('Error loading editor state:', error);
@@ -3134,6 +3259,13 @@ const showTutorialIfNeeded = () => {
   if (!tutorialDismissed) {
     openTutorial();
   }
+};
+
+const loadNavigatorPreference = () => {
+  if (typeof window === 'undefined') return;
+
+  const storedPreference = window.localStorage.getItem(SHOW_NAVIGATOR_STORAGE_KEY);
+  showNavigator.value = storedPreference !== 'false';
 };
 
 const goToNextTutorialStep = () => {
@@ -3182,11 +3314,16 @@ watch([
   saveEditorState();
 }, { deep: true });
 
+watch([currentProjectId, currentProjectName], () => {
+  saveEditorState();
+});
+
 // Load saved state when component mounts
 onMounted(() => {
   unsavedNavigationStore.setEditorMounted(true);
   window.addEventListener('beforeunload', handleBeforeUnload);
   window.addEventListener('keydown', handleEditorHistoryKeydown);
+  loadNavigatorPreference();
   loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
@@ -3228,6 +3365,11 @@ onUnmounted(() => {
 watch(hasUnsavedChanges, (value) => {
   unsavedNavigationStore.setHasUnsavedChanges(value);
 }, { immediate: true });
+
+watch(showNavigator, (value) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(SHOW_NAVIGATOR_STORAGE_KEY, String(value));
+});
 
 watch(() => getSnapshotSignature(), () => {
   if (isApplyingHistoryState.value) return;
@@ -3625,6 +3767,16 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             ></v-btn>
           </template>
         </v-tooltip>
+        <v-tooltip text="Reset Image View" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn
+              v-bind="props"
+              icon="mdi-fit-to-screen-outline"
+              :disabled="!droppedImageSrc"
+              @click="resetImageView"
+            ></v-btn>
+          </template>
+        </v-tooltip>
         <v-tooltip text="Enable Chat Drag/Zoom (Arrows, +/-)" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn 
@@ -3871,6 +4023,16 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                     icon="mdi-drag-variant"
                     :color="isImageDraggingEnabled ? 'primary' : undefined"
                     @click="toggleImageDrag"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Reset Image View" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-fit-to-screen-outline"
+                    :disabled="!droppedImageSrc"
+                    @click="resetImageView"
                   ></v-btn>
                 </template>
               </v-tooltip>
@@ -4172,6 +4334,14 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                 Reopen Tutorial
               </v-btn>
             </div>
+            <v-switch
+              v-model="showNavigator"
+              color="primary"
+              inset
+              hide-details
+              label="Show navigator preview"
+              class="mt-4"
+            ></v-switch>
           </div>
 
           <div class="settings-section mb-6">
@@ -4714,6 +4884,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <!-- Display Dropped Image -->
             <img 
               v-if="droppedImageSrc"
+              ref="imageElementRef"
               :src="droppedImageSrc" 
               alt="Dropped Screenshot"
               class="dropped-image"
@@ -4792,6 +4963,48 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               {{ projectStatusMessage }}
             </div>
           </div>
+          <v-sheet
+            v-if="showImageMinimap && droppedImageSrc"
+            class="image-minimap mb-3"
+            border
+            rounded="lg"
+          >
+            <div class="image-minimap-header">
+              <div>
+                <div class="text-subtitle-2">Navigator</div>
+                <div class="text-caption text-medium-emphasis">
+                  Click anywhere in the preview to recenter the screenshot.
+                </div>
+              </div>
+              <v-btn
+                size="x-small"
+                variant="text"
+                icon="mdi-fit-to-screen-outline"
+                @click="resetImageView"
+              ></v-btn>
+            </div>
+            <div
+              ref="minimapRef"
+              class="image-minimap-frame"
+              :style="{ width: `${minimapSize.width}px`, height: `${minimapSize.height}px` }"
+              @click="recenterImageFromMinimap"
+            >
+              <img
+                :src="droppedImageSrc"
+                alt="Navigator preview"
+                class="image-minimap-preview"
+              />
+              <div
+                class="image-minimap-viewport"
+                :style="{
+                  left: `${minimapViewport.left}px`,
+                  top: `${minimapViewport.top}px`,
+                  width: `${minimapViewport.width}px`,
+                  height: `${minimapViewport.height}px`
+                }"
+              ></div>
+            </div>
+          </v-sheet>
           <div class="d-flex align-center justify-space-between mb-2">
             <div class="text-subtitle-1">Chat Layers</div>
             <v-btn
@@ -5083,6 +5296,48 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   height: 100%;
   object-fit: contain; /* Scale image while preserving aspect ratio */
   z-index: 0;
+}
+
+.image-minimap {
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.image-minimap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.image-minimap-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  cursor: crosshair;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  margin: 0 auto;
+}
+
+.image-minimap-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+  opacity: 0.92;
+}
+
+.image-minimap-viewport {
+  position: absolute;
+  border: 2px solid rgba(66, 165, 245, 0.95);
+  background: rgba(66, 165, 245, 0.16);
+  box-shadow: 0 0 0 999px rgba(7, 10, 17, 0.18);
+  border-radius: 6px;
+  pointer-events: none;
 }
 
 .image-effect-layer {

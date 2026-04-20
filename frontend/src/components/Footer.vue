@@ -3,11 +3,35 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.16-beta'; // Incremented version
+const version = 'v2.0.17-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.17-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added an image navigator preview for zoomed or panned screenshots, including click-to-recenter behavior and quick reset view controls'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Moved the navigator out of the canvas so it never covers the artwork and added a settings toggle to show or hide it while keeping it enabled by default'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed restored saved sessions coming back as unsaved work by persisting and restoring the active project identity alongside the editor snapshot'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.16-beta',
         date: 'APR-19-2026',
