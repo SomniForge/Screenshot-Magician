@@ -18,6 +18,7 @@ const dropZoneWidth = ref<number | null>(800); // Default width
 const dropZoneHeight = ref<number | null>(600); // Default height
 const fileInputRef = ref<HTMLInputElement | null>(null); // Ref for the file input element
 const chatFileInputRef = ref<HTMLInputElement | null>(null); // New ref for chat file input
+const projectFileInputRef = ref<HTMLInputElement | null>(null);
 const showNewSessionDialog = ref(false); // Control dialog visibility
 
 // --- Resizable Chat Panel State ---
@@ -114,6 +115,24 @@ interface ProjectRecord {
   snapshot: EditorStateSnapshot;
 }
 
+interface SaveProjectOptions {
+  forceNewProject?: boolean;
+  autosave?: boolean;
+  refreshProjectList?: boolean;
+}
+
+interface PortableProjectFile {
+  format: 'ssmag-project';
+  version: 1;
+  exportedAt: string;
+  project: {
+    name: string;
+    createdAt: string;
+    updatedAt: string;
+    snapshot: EditorStateSnapshot;
+  };
+}
+
 interface ImageEffectLayer {
   presetId: string;
   opacity: number;
@@ -133,6 +152,14 @@ interface TutorialStep {
   title: string;
   icon: string;
   description: string;
+}
+
+interface ShortcutGroup {
+  title: string;
+  items: Array<{
+    label: string;
+    keys: string[];
+  }>;
 }
 
 interface EditorThemePalette {
@@ -163,7 +190,17 @@ interface PendingEditorAction {
   projectId?: string;
 }
 
+interface EditorHistoryEntry {
+  signature: string;
+  snapshot: EditorStateSnapshot;
+  currentProjectId: string | null;
+  currentProjectName: string;
+}
+
 const DEFAULT_CHAT_LINE_WIDTH = 640;
+const HISTORY_LIMIT = 50;
+const HISTORY_COMMIT_DELAY_MS = 250;
+const PROJECT_AUTOSAVE_DELAY_MS = 1200;
 const DEFAULT_SELECTED_TEXT = {
   lineIndex: -1,
   startOffset: 0,
@@ -187,13 +224,17 @@ const activeChatOverlay = computed(() =>
 const projectRecords = ref<Array<Pick<ProjectRecord, 'id' | 'name' | 'createdAt' | 'updatedAt'>>>([]);
 const currentProjectId = ref<string | null>(null);
 const currentProjectName = ref('');
+const autosaveState = ref<'idle' | 'pending' | 'saving' | 'saved' | 'error'>('idle');
 const showUnsavedChangesDialog = ref(false);
 const pendingEditorAction = ref<PendingEditorAction | null>(null);
 const lastSavedSnapshotSignature = ref('');
+const historyEntries = ref<EditorHistoryEntry[]>([]);
+const historyIndex = ref(-1);
 const showProjectsDialog = ref(false);
 const showSaveProjectDialog = ref(false);
 const showEffectsDialog = ref(false);
 const showSettingsDialog = ref(false);
+const showKeyboardShortcutsDialog = ref(false);
 const showTutorialDialog = ref(false);
 const pendingProjectName = ref('');
 const isProjectsLoading = ref(false);
@@ -219,6 +260,9 @@ const vuetifyTheme = useTheme();
 const { width: viewportWidth } = useDisplay();
 const { showAds, setShowAds } = useAdPreferences();
 const { trackEvent } = useAnalytics();
+const isApplyingHistoryState = ref(false);
+let historyCommitTimer: ReturnType<typeof setTimeout> | null = null;
+let projectAutosaveTimer: ReturnType<typeof setTimeout> | null = null;
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
@@ -354,6 +398,37 @@ const tutorialSteps: TutorialStep[] = [
     title: 'Save Your Work',
     icon: 'mdi-content-save-outline',
     description: 'Use Save Project to keep your session locally, or Save Image to export the final screenshot when everything looks right.'
+  }
+];
+
+const shortcutGroups: ShortcutGroup[] = [
+  {
+    title: 'Project',
+    items: [
+      { label: 'Open keyboard shortcuts', keys: ['?'] },
+      { label: 'Save project', keys: ['Ctrl', 'S'] },
+      { label: 'Undo', keys: ['Ctrl', 'Z'] },
+      { label: 'Redo', keys: ['Ctrl', 'Y'] },
+      { label: 'Redo alternative', keys: ['Ctrl', 'Shift', 'Z'] }
+    ]
+  },
+  {
+    title: 'Canvas',
+    items: [
+      { label: 'Nudge active image', keys: ['Arrow Keys'] },
+      { label: 'Large nudge active image', keys: ['Shift', 'Arrow Keys'] },
+      { label: 'Zoom active image', keys: ['+', '/ -'] }
+    ]
+  },
+  {
+    title: 'Chat Layer',
+    items: [
+      { label: 'Update or create selected chat', keys: ['Ctrl', 'Enter'] },
+      { label: 'Nudge active chat layer', keys: ['Arrow Keys'] },
+      { label: 'Large nudge active chat layer', keys: ['Shift', 'Arrow Keys'] },
+      { label: 'Zoom active chat layer', keys: ['+', '/ -'] },
+      { label: 'Clear selected censor or color formatting', keys: ['Delete'] }
+    ]
   }
 ];
 
@@ -1124,6 +1199,18 @@ const createEditorSnapshot = (): EditorStateSnapshot => ({
 const toSerializableSnapshot = (snapshot: EditorStateSnapshot): EditorStateSnapshot =>
   JSON.parse(JSON.stringify(snapshot)) as EditorStateSnapshot;
 
+const toPortableProjectFile = (project: ProjectRecord): PortableProjectFile => ({
+  format: 'ssmag-project',
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  project: {
+    name: project.name,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    snapshot: toSerializableSnapshot(project.snapshot)
+  }
+});
+
 const createComparableSnapshot = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => ({
   ...toSerializableSnapshot(snapshot),
   selectedText: { ...DEFAULT_SELECTED_TEXT }
@@ -1136,9 +1223,242 @@ const markCurrentStateAsSaved = (snapshot: EditorStateSnapshot = createEditorSna
   lastSavedSnapshotSignature.value = getSnapshotSignature(snapshot);
 };
 
+const createHistoryEntry = (snapshot: EditorStateSnapshot = createEditorSnapshot()): EditorHistoryEntry => {
+  const serializableSnapshot = toSerializableSnapshot(snapshot);
+
+  return {
+    signature: getSnapshotSignature(serializableSnapshot),
+    snapshot: serializableSnapshot,
+    currentProjectId: currentProjectId.value,
+    currentProjectName: currentProjectName.value
+  };
+};
+
+const resetHistoryState = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => {
+  if (historyCommitTimer) {
+    clearTimeout(historyCommitTimer);
+    historyCommitTimer = null;
+  }
+
+  const initialEntry = createHistoryEntry(snapshot);
+  historyEntries.value = [initialEntry];
+  historyIndex.value = 0;
+};
+
+const commitHistorySnapshot = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => {
+  const entry = createHistoryEntry(snapshot);
+  const currentEntry = historyEntries.value[historyIndex.value];
+
+  if (currentEntry?.signature === entry.signature) return;
+
+  const nextEntries = historyEntries.value.slice(0, historyIndex.value + 1);
+  nextEntries.push(entry);
+
+  if (nextEntries.length > HISTORY_LIMIT) {
+    nextEntries.shift();
+  }
+
+  historyEntries.value = nextEntries;
+  historyIndex.value = nextEntries.length - 1;
+};
+
+const canUndo = computed(() => historyIndex.value > 0);
+const canRedo = computed(() => historyIndex.value >= 0 && historyIndex.value < historyEntries.value.length - 1);
+
 const hasUnsavedChanges = computed(() =>
   getSnapshotSignature() !== lastSavedSnapshotSignature.value
 );
+
+const applyHistoryEntry = (entry: EditorHistoryEntry) => {
+  isApplyingHistoryState.value = true;
+  applyEditorSnapshot(entry.snapshot);
+  currentProjectId.value = entry.currentProjectId;
+  currentProjectName.value = entry.currentProjectName;
+  showUnsavedChangesDialog.value = false;
+  pendingEditorAction.value = null;
+  window.setTimeout(() => {
+    isApplyingHistoryState.value = false;
+  }, 0);
+};
+
+const undoEditorChange = () => {
+  if (!canUndo.value) return;
+
+  historyIndex.value -= 1;
+  applyHistoryEntry(historyEntries.value[historyIndex.value]);
+};
+
+const redoEditorChange = () => {
+  if (!canRedo.value) return;
+
+  historyIndex.value += 1;
+  applyHistoryEntry(historyEntries.value[historyIndex.value]);
+};
+
+const isEditableEventTarget = (target: EventTarget | null) =>
+  target instanceof HTMLInputElement
+  || target instanceof HTMLTextAreaElement
+  || (target instanceof HTMLElement && target.isContentEditable);
+
+const nudgeImage = (deltaX: number, deltaY: number) => {
+  if (!droppedImageSrc.value) return false;
+
+  imageTransform.x += deltaX;
+  imageTransform.y += deltaY;
+  return true;
+};
+
+const nudgeActiveChatOverlay = (deltaX: number, deltaY: number) => {
+  if (!activeChatOverlay.value) return false;
+
+  activeChatOverlay.value.transform.x += deltaX;
+  activeChatOverlay.value.transform.y += deltaY;
+  renderKey.value++;
+  return true;
+};
+
+const zoomImage = (direction: 'in' | 'out') => {
+  if (!droppedImageSrc.value) return false;
+
+  const scaleAmount = 0.1;
+  const minScale = 0.1;
+  const maxScale = 10;
+
+  imageTransform.scale = direction === 'in'
+    ? Math.min(maxScale, imageTransform.scale + scaleAmount)
+    : Math.max(minScale, imageTransform.scale - scaleAmount);
+
+  return true;
+};
+
+const zoomActiveChatOverlay = (direction: 'in' | 'out') => {
+  if (!activeChatOverlay.value) return false;
+
+  const scaleAmount = 0.1;
+  const minScale = 0.1;
+  const maxScale = 10;
+
+  activeChatOverlay.value.transform.scale = direction === 'in'
+    ? Math.min(maxScale, activeChatOverlay.value.transform.scale + scaleAmount)
+    : Math.max(minScale, activeChatOverlay.value.transform.scale - scaleAmount);
+
+  renderKey.value++;
+  return true;
+};
+
+const clearSelectedFormatting = () => {
+  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return false;
+
+  const hasMatchingCensor = activeChatOverlay.value.censoredRegions.some((region) =>
+    region.lineIndex === selectedText.lineIndex
+    && region.startOffset < selectedText.endOffset
+    && region.endOffset > selectedText.startOffset
+  );
+
+  const hasMatchingColorOverride = activeChatOverlay.value.manualColorRegions.some((region) =>
+    region.lineIndex === selectedText.lineIndex
+    && region.startOffset < selectedText.endOffset
+    && region.endOffset > selectedText.startOffset
+  );
+
+  if (!hasMatchingCensor && !hasMatchingColorOverride) return false;
+
+  clearCensorType();
+  removeManualColorOverride();
+  renderKey.value++;
+  return true;
+};
+
+const openKeyboardShortcuts = () => {
+  showKeyboardShortcutsDialog.value = true;
+};
+
+const handleEditorHistoryKeydown = (event: KeyboardEvent) => {
+  const key = event.key.toLowerCase();
+  const isEditableTarget = isEditableEventTarget(event.target);
+
+  if (!isEditableTarget && key === '?') {
+    event.preventDefault();
+    openKeyboardShortcuts();
+    return;
+  }
+
+  if (event.ctrlKey || event.metaKey) {
+    if (event.altKey) return;
+
+    if (key === 's') {
+      event.preventDefault();
+      void saveCurrentProject();
+      return;
+    }
+
+    if (isEditableTarget) return;
+
+    const shouldRedo = key === 'y' || (key === 'z' && event.shiftKey);
+
+    if (key !== 'z' && key !== 'y') return;
+
+    event.preventDefault();
+
+    if (shouldRedo) {
+      redoEditorChange();
+      return;
+    }
+
+    undoEditorChange();
+    return;
+  }
+
+  if (isEditableTarget) return;
+
+  const nudgeAmount = event.shiftKey ? 10 : 1;
+
+  if (key === 'delete' || key === 'backspace') {
+    if (!clearSelectedFormatting()) return;
+
+    event.preventDefault();
+    return;
+  }
+
+  if (key === 'arrowup' || key === 'arrowdown' || key === 'arrowleft' || key === 'arrowright') {
+    let handled = false;
+
+    if (isChatDraggingEnabled.value && activeChatOverlay.value) {
+      if (key === 'arrowup') handled = nudgeActiveChatOverlay(0, -nudgeAmount);
+      if (key === 'arrowdown') handled = nudgeActiveChatOverlay(0, nudgeAmount);
+      if (key === 'arrowleft') handled = nudgeActiveChatOverlay(-nudgeAmount, 0);
+      if (key === 'arrowright') handled = nudgeActiveChatOverlay(nudgeAmount, 0);
+    } else if (isImageDraggingEnabled.value && droppedImageSrc.value) {
+      if (key === 'arrowup') handled = nudgeImage(0, -nudgeAmount);
+      if (key === 'arrowdown') handled = nudgeImage(0, nudgeAmount);
+      if (key === 'arrowleft') handled = nudgeImage(-nudgeAmount, 0);
+      if (key === 'arrowright') handled = nudgeImage(nudgeAmount, 0);
+    }
+
+    if (!handled) return;
+
+    event.preventDefault();
+    return;
+  }
+
+  const isZoomInKey = key === '+' || key === '=' || key === 'add';
+  const isZoomOutKey = key === '-' || key === '_' || key === 'subtract';
+
+  if (!isZoomInKey && !isZoomOutKey) return;
+
+  let handled = false;
+  const direction = isZoomInKey ? 'in' : 'out';
+
+  if (isChatDraggingEnabled.value && activeChatOverlay.value) {
+    handled = zoomActiveChatOverlay(direction);
+  } else if (isImageDraggingEnabled.value && droppedImageSrc.value) {
+    handled = zoomImage(direction);
+  }
+
+  if (!handled) return;
+
+  event.preventDefault();
+};
 
 const handleBeforeUnload = (event: BeforeUnloadEvent) => {
   if (!unsavedNavigationStore.shouldWarnBeforeLeaving) return;
@@ -1170,6 +1490,30 @@ const getAnalyticsContext = () => ({
   chat_layers_count: chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0).length,
   image_effects_count: imageEffects.value.length,
   line_width: chatLineWidth.value
+});
+
+const projectStatusMessage = computed(() => {
+  if (autosaveState.value === 'saving') {
+    return 'Autosaving locally...';
+  }
+
+  if (autosaveState.value === 'saved') {
+    return 'Autosaved locally in this browser';
+  }
+
+  if (autosaveState.value === 'error') {
+    return 'Autosave failed. Use Save Project to try again.';
+  }
+
+  if (hasUnsavedChanges.value) {
+    return currentProjectId.value
+      ? 'You have unsaved changes. Autosave will update this project shortly.'
+      : 'You have unsaved changes.';
+  }
+
+  return currentProjectId.value
+    ? 'Saved locally in this browser'
+    : 'Use Save Project to keep this work for later';
 });
 
 const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
@@ -1690,6 +2034,78 @@ const handleChatFileSelect = async (event: Event) => {
 const triggerChatFileInput = () => {
   if (chatFileInputRef.value) {
     chatFileInputRef.value.click();
+  }
+};
+
+const triggerProjectFileInput = () => {
+  if (projectFileInputRef.value) {
+    projectFileInputRef.value.click();
+  }
+};
+
+const exportProjectFile = async (projectId: string) => {
+  try {
+    const project = await loadStoredProject(projectId);
+    if (!project) return;
+
+    const portableProject = toPortableProjectFile(project);
+    const projectSlug = project.name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'screenshot-magician-project';
+    const blob = new Blob([JSON.stringify(portableProject, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${projectSlug}.ssmag`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error('Error exporting project file:', error);
+  }
+};
+
+const handleProjectFileImport = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const files = target.files;
+
+  if (!files || files.length === 0) {
+    target.value = '';
+    return;
+  }
+
+  const file = files[0];
+
+  try {
+    const rawText = await file.text();
+    const importedFile = JSON.parse(rawText) as Partial<PortableProjectFile>;
+
+    if (
+      importedFile.format !== 'ssmag-project'
+      || importedFile.version !== 1
+      || !importedFile.project
+      || !importedFile.project.snapshot
+    ) {
+      throw new Error('Unsupported project file format.');
+    }
+
+    const importedProject: ProjectRecord = {
+      id: createProjectId(),
+      name: importedFile.project.name?.trim() || file.name.replace(/\.ssmag$/i, '') || 'Imported Project',
+      createdAt: importedFile.project.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      snapshot: toSerializableSnapshot(importedFile.project.snapshot as EditorStateSnapshot)
+    };
+
+    await saveStoredProject(importedProject);
+    await refreshProjectList();
+  } catch (error) {
+    console.error('Error importing project file:', error);
+  } finally {
+    target.value = '';
   }
 };
 
@@ -2688,11 +3104,13 @@ watch([
 onMounted(() => {
   unsavedNavigationStore.setEditorMounted(true);
   window.addEventListener('beforeunload', handleBeforeUnload);
+  window.addEventListener('keydown', handleEditorHistoryKeydown);
   loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
   loadEditorState();
   markCurrentStateAsSaved();
+  resetHistoryState();
   refreshProjectList();
   showTutorialIfNeeded();
   
@@ -2711,7 +3129,14 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (historyCommitTimer) {
+    clearTimeout(historyCommitTimer);
+  }
+  if (projectAutosaveTimer) {
+    clearTimeout(projectAutosaveTimer);
+  }
   window.removeEventListener('beforeunload', handleBeforeUnload);
+  window.removeEventListener('keydown', handleEditorHistoryKeydown);
   unsavedNavigationStore.reset();
   handleChatMouseUpOrLeave();
 });
@@ -2719,6 +3144,58 @@ onUnmounted(() => {
 watch(hasUnsavedChanges, (value) => {
   unsavedNavigationStore.setHasUnsavedChanges(value);
 }, { immediate: true });
+
+watch(() => getSnapshotSignature(), () => {
+  if (isApplyingHistoryState.value) return;
+
+  if (historyCommitTimer) {
+    clearTimeout(historyCommitTimer);
+  }
+
+  historyCommitTimer = setTimeout(() => {
+    commitHistorySnapshot();
+    historyCommitTimer = null;
+  }, HISTORY_COMMIT_DELAY_MS);
+});
+
+watch(
+  [() => getSnapshotSignature(), currentProjectId, currentProjectName],
+  ([, projectId, projectName]) => {
+    if (projectAutosaveTimer) {
+      clearTimeout(projectAutosaveTimer);
+      projectAutosaveTimer = null;
+    }
+
+    if (isApplyingHistoryState.value || !projectId || !projectName.trim()) {
+      if (!projectId) {
+        autosaveState.value = 'idle';
+      }
+      return;
+    }
+
+    if (!hasUnsavedChanges.value) {
+      if (autosaveState.value !== 'error') {
+        autosaveState.value = 'saved';
+      }
+      return;
+    }
+
+    autosaveState.value = 'pending';
+    projectAutosaveTimer = setTimeout(async () => {
+      projectAutosaveTimer = null;
+
+      if (!currentProjectId.value || !currentProjectName.value.trim() || !hasUnsavedChanges.value) {
+        return;
+      }
+
+      await saveProject({
+        autosave: true,
+        refreshProjectList: false
+      });
+      await refreshProjectList();
+    }, PROJECT_AUTOSAVE_DELAY_MS);
+  }
+);
 
 watch(chatLineWidth, (newValue) => {
   if (!activeChatOverlay.value) return;
@@ -2792,9 +3269,17 @@ const promptSaveProject = () => {
   showSaveProjectDialog.value = true;
 };
 
-const saveProject = async (forceNewProject = false) => {
-  const trimmedName = pendingProjectName.value.trim();
-  if (!trimmedName) return;
+const saveProject = async (options: SaveProjectOptions = {}) => {
+  const {
+    forceNewProject = false,
+    autosave = false,
+    refreshProjectList: shouldRefreshProjectList = true
+  } = options;
+
+  const trimmedName = autosave
+    ? currentProjectName.value.trim()
+    : pendingProjectName.value.trim();
+  if (!trimmedName) return false;
 
   const now = new Date().toISOString();
   const hadExistingProject = Boolean(currentProjectId.value);
@@ -2812,30 +3297,43 @@ const saveProject = async (forceNewProject = false) => {
   };
 
   try {
+    autosaveState.value = autosave ? 'saving' : autosaveState.value;
     await saveStoredProject(projectRecord);
     currentProjectId.value = projectRecord.id;
     currentProjectName.value = projectRecord.name;
     markCurrentStateAsSaved(projectRecord.snapshot);
-    trackEvent('save_project', {
-      save_mode: forceNewProject ? 'save_as_new' : hadExistingProject ? 'overwrite' : 'create',
-      had_existing_project: hadExistingProject,
-      ...getAnalyticsContext()
-    });
-    showSaveProjectDialog.value = false;
-    await refreshProjectList();
 
-    if (pendingEditorAction.value) {
-      const action = pendingEditorAction.value;
-      closePendingEditorAction();
+    if (autosave) {
+      autosaveState.value = 'saved';
+    } else {
+      autosaveState.value = 'idle';
+      trackEvent('save_project', {
+        save_mode: forceNewProject ? 'save_as_new' : hadExistingProject ? 'overwrite' : 'create',
+        had_existing_project: hadExistingProject,
+        ...getAnalyticsContext()
+      });
+      showSaveProjectDialog.value = false;
+      if (shouldRefreshProjectList) {
+        await refreshProjectList();
+      }
 
-      if (action.type === 'new-session') {
-        resetSession();
-      } else if (action.type === 'load-project' && action.projectId) {
-        await loadProject(action.projectId, { bypassUnsavedCheck: true });
+      if (pendingEditorAction.value) {
+        const action = pendingEditorAction.value;
+        closePendingEditorAction();
+
+        if (action.type === 'new-session') {
+          resetSession();
+        } else if (action.type === 'load-project' && action.projectId) {
+          await loadProject(action.projectId, { bypassUnsavedCheck: true });
+        }
       }
     }
+
+    return true;
   } catch (error) {
+    autosaveState.value = autosave ? 'error' : autosaveState.value;
     console.error('Error saving project:', error);
+    return false;
   }
 };
 
@@ -2873,7 +3371,7 @@ const saveCurrentProject = async () => {
   }
 
   pendingProjectName.value = currentProjectName.value;
-  await saveProject(false);
+  await saveProject();
 };
 
 const deleteProject = async (projectId: string) => {
@@ -2930,9 +3428,34 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <v-btn v-bind="props" icon="mdi-folder-open-outline" @click="openProjectsManager"></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Save Project" location="bottom">
+        <v-tooltip text="Undo (Ctrl+Z)" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn
+              v-bind="props"
+              icon="mdi-undo"
+              :disabled="!canUndo"
+              @click="undoEditorChange"
+            ></v-btn>
+          </template>
+        </v-tooltip>
+        <v-tooltip text="Redo (Ctrl+Y)" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn
+              v-bind="props"
+              icon="mdi-redo"
+              :disabled="!canRedo"
+              @click="redoEditorChange"
+            ></v-btn>
+          </template>
+        </v-tooltip>
+        <v-tooltip text="Save Project (Ctrl+S)" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn v-bind="props" icon="mdi-content-save-cog-outline" @click="saveCurrentProject"></v-btn>
+          </template>
+        </v-tooltip>
+        <v-tooltip text="Keyboard Shortcuts (?)" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn v-bind="props" icon="mdi-keyboard-outline" @click="openKeyboardShortcuts"></v-btn>
           </template>
         </v-tooltip>
         <v-tooltip text="Settings" location="bottom">
@@ -3008,7 +3531,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       <v-spacer></v-spacer>
 
       <div class="toolbar-button-group">
-        <v-tooltip text="Enable Image Drag/Zoom" location="bottom">
+        <v-tooltip text="Enable Image Drag/Zoom (Arrows, +/-)" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn 
               v-bind="props" 
@@ -3018,7 +3541,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             ></v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip text="Enable Chat Drag/Zoom" location="bottom">
+        <v-tooltip text="Enable Chat Drag/Zoom (Arrows, +/-)" location="bottom">
           <template v-slot:activator="{ props }">
             <v-btn 
               v-bind="props" 
@@ -3135,9 +3658,34 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                   <v-btn v-bind="props" icon="mdi-folder-open-outline" @click="openProjectsManager"></v-btn>
                 </template>
               </v-tooltip>
-              <v-tooltip text="Save Project" location="bottom">
+              <v-tooltip text="Undo (Ctrl+Z)" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-undo"
+                    :disabled="!canUndo"
+                    @click="undoEditorChange"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Redo (Ctrl+Y)" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-redo"
+                    :disabled="!canRedo"
+                    @click="redoEditorChange"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Save Project (Ctrl+S)" location="bottom">
                 <template v-slot:activator="{ props }">
                   <v-btn v-bind="props" icon="mdi-content-save-cog-outline" @click="saveCurrentProject"></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Keyboard Shortcuts (?)" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn v-bind="props" icon="mdi-keyboard-outline" @click="openKeyboardShortcuts"></v-btn>
                 </template>
               </v-tooltip>
               <v-tooltip text="Settings" location="bottom">
@@ -3232,7 +3780,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
           <div class="toolbar-compact-row">
             <div class="toolbar-button-group">
-              <v-tooltip text="Enable Image Drag/Zoom" location="bottom">
+              <v-tooltip text="Enable Image Drag/Zoom (Arrows, +/-)" location="bottom">
                 <template v-slot:activator="{ props }">
                   <v-btn
                     v-bind="props"
@@ -3242,7 +3790,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                   ></v-btn>
                 </template>
               </v-tooltip>
-              <v-tooltip text="Enable Chat Drag/Zoom" location="bottom">
+              <v-tooltip text="Enable Chat Drag/Zoom (Arrows, +/-)" location="bottom">
                 <template v-slot:activator="{ props }">
                   <v-btn
                     v-bind="props"
@@ -3466,6 +4014,53 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="showKeyboardShortcutsDialog" max-width="760">
+      <v-card class="shortcuts-card">
+        <v-card-title class="d-flex align-center justify-space-between">
+          <div>
+            <div class="text-h6">Keyboard Shortcuts</div>
+            <div class="text-body-2 text-medium-emphasis">
+              Faster editing, right where you already work.
+            </div>
+          </div>
+          <v-btn icon="mdi-close" variant="text" @click="showKeyboardShortcutsDialog = false"></v-btn>
+        </v-card-title>
+        <v-card-text>
+          <div class="shortcuts-grid">
+            <v-sheet
+              v-for="group in shortcutGroups"
+              :key="group.title"
+              class="shortcuts-group"
+              border
+              rounded="xl"
+            >
+              <div class="text-subtitle-1 mb-3">{{ group.title }}</div>
+              <div
+                v-for="shortcut in group.items"
+                :key="`${group.title}-${shortcut.label}`"
+                class="shortcut-row"
+              >
+                <div class="text-body-2">{{ shortcut.label }}</div>
+                <div class="shortcut-keys">
+                  <template v-for="(keyPart, index) in shortcut.keys" :key="`${shortcut.label}-${keyPart}-${index}`">
+                    <span class="shortcut-key">{{ keyPart }}</span>
+                    <span v-if="index < shortcut.keys.length - 1" class="shortcut-plus">+</span>
+                  </template>
+                </div>
+              </div>
+            </v-sheet>
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <div class="text-caption text-medium-emphasis px-4">
+            Arrow nudging and +/- zoom affect whichever drag mode is currently active.
+          </div>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showKeyboardShortcutsDialog = false">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="showSettingsDialog" max-width="900">
       <v-card>
         <v-card-title class="d-flex align-center justify-space-between">
@@ -3478,6 +4073,23 @@ const preventNativePreviewDrag = (event: DragEvent) => {
           <v-btn icon="mdi-close" variant="text" @click="showSettingsDialog = false"></v-btn>
         </v-card-title>
         <v-card-text>
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
+              <div class="text-subtitle-1">Workflow</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Keep the editor easy to learn with guided help and shortcut discovery that stays out of the way.
+              </div>
+            </div>
+            <div class="settings-action-row">
+              <v-btn variant="tonal" color="primary" prepend-icon="mdi-keyboard-outline" @click="openKeyboardShortcuts">
+                View Keyboard Shortcuts
+              </v-btn>
+              <v-btn variant="text" prepend-icon="mdi-help-circle-outline" @click="showSettingsDialog = false; openTutorial()">
+                Reopen Tutorial
+              </v-btn>
+            </div>
+          </div>
+
           <div class="settings-section mb-6">
             <div class="settings-section-header">
               <div class="text-subtitle-1">Ads</div>
@@ -3730,11 +4342,11 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             v-if="currentProjectId"
             variant="text"
             color="secondary"
-            @click="saveProject(true)"
+            @click="saveProject({ forceNewProject: true })"
           >
             Save As New
           </v-btn>
-          <v-btn color="primary" variant="text" @click="saveProject(false)">
+          <v-btn color="primary" variant="text" @click="saveProject()">
             {{ currentProjectId ? 'Save' : 'Create' }}
           </v-btn>
         </v-card-actions>
@@ -3895,13 +4507,21 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       <v-card>
         <v-card-title class="d-flex align-center justify-space-between">
           <span class="text-h6">Projects</span>
-          <v-btn size="small" variant="tonal" color="primary" prepend-icon="mdi-plus" @click="promptSaveProject">
-            New Project Save
-          </v-btn>
+          <div class="d-flex align-center ga-2 flex-wrap justify-end">
+            <v-btn size="small" variant="tonal" prepend-icon="mdi-file-import-outline" @click="triggerProjectFileInput">
+              Import .ssmag
+            </v-btn>
+            <v-btn size="small" variant="tonal" color="primary" prepend-icon="mdi-plus" @click="promptSaveProject">
+              New Project Save
+            </v-btn>
+          </div>
         </v-card-title>
         <v-card-text>
           <div v-if="currentProjectName" class="text-body-2 mb-4">
             Current project: <strong>{{ currentProjectName }}</strong>
+          </div>
+          <div class="text-caption text-medium-emphasis mb-4">
+            Import exported `.ssmag` files into this browser, or export any saved project to move it between machines.
           </div>
           <div v-if="isProjectsLoading" class="text-medium-emphasis">
             Loading projects...
@@ -3929,6 +4549,12 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                   >
                     Open
                   </v-btn>
+                  <v-btn
+                    icon="mdi-file-export-outline"
+                    size="small"
+                    variant="text"
+                    @click="exportProjectFile(project.id)"
+                  ></v-btn>
                   <v-btn
                     icon="mdi-delete-outline"
                     size="small"
@@ -3965,6 +4591,13 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       class="hidden-input" 
       accept=".txt,text/plain"
       @change="handleChatFileSelect"
+    />
+    <input
+      type="file"
+      ref="projectFileInputRef"
+      class="hidden-input"
+      accept=".ssmag,application/json"
+      @change="handleProjectFileImport"
     />
 
     <!-- Row takes remaining height and full width. Padding applied here. -->
@@ -4068,11 +4701,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               {{ currentProjectName || 'Unsaved session' }}
             </div>
             <div class="text-caption text-medium-emphasis">
-              {{ hasUnsavedChanges
-                ? 'You have unsaved changes.'
-                : currentProjectId
-                  ? 'Saved locally in this browser'
-                  : 'Use Save Project to keep this work for later' }}
+              {{ projectStatusMessage }}
             </div>
           </div>
           <div class="d-flex align-center justify-space-between mb-2">
@@ -4466,6 +5095,63 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   gap: 10px;
 }
 
+.shortcuts-card {
+  overflow: hidden;
+}
+
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.shortcuts-group {
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.shortcut-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.shortcut-keys {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.shortcut-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(var(--v-theme-primary), 0.28);
+  background: rgba(var(--v-theme-primary), 0.1);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.shortcut-plus {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.55);
+}
+
 .toolbar-button-group .v-btn {
   margin: 0 2px;
 }
@@ -4638,6 +5324,13 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
 .settings-section-header {
   margin-bottom: 16px;
+}
+
+.settings-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
 }
 
 .theme-grid {

@@ -3,11 +3,31 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.14-beta'; // Incremented version
+const version = 'v2.0.15-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.15-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added full editor undo and redo controls with keyboard support so project-wide changes can be stepped backward or forward more naturally',
+                    'Added keyboard shortcut discovery with shortcut-aware tooltips, a dedicated shortcuts dialog, toolbar access, and ? quick help'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Added lightweight autosave for named projects so saved work updates quietly in the background after editing pauses',
+                    'Improved project management by supporting portable .ssmag project export and import for moving work between browsers or machines'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.14-beta',
         date: 'APR-19-2026',
