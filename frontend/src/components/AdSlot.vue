@@ -85,10 +85,22 @@ watch(resolvedAdSlot, () => {
 .ad-slot {
   background: rgba(255, 255, 255, 0.03);
   border-color: rgba(255, 255, 255, 0.08) !important;
+  color: rgba(245, 247, 250, 0.94);
 }
 
 .ad-slot-copy {
   min-width: 0;
+}
+
+.ad-slot :deep(.text-medium-emphasis),
+.ad-slot .text-medium-emphasis {
+  color: rgba(245, 247, 250, 0.74) !important;
+}
+
+.ad-slot :deep(.text-overline),
+.ad-slot :deep(.text-subtitle-1),
+.ad-slot :deep(.text-h6) {
+  color: rgba(245, 247, 250, 0.94) !important;
 }
 
 .ad-slot-compact {

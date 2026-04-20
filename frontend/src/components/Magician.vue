@@ -5604,6 +5604,18 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   color: #f3f4f6 !important;
 }
 
+.chatlog-panel-sheet :deep(.text-medium-emphasis),
+.chatlog-panel-sheet .text-medium-emphasis,
+.chatlog-panel-sheet .text-caption,
+.chatlog-panel-sheet .text-body-2 {
+  color: rgba(243, 244, 246, 0.78) !important;
+}
+
+.chatlog-panel-sheet .text-subtitle-2,
+.chatlog-panel-sheet .text-subtitle-1 {
+  color: #f3f4f6 !important;
+}
+
 .swatch-grid {
   display: flex;
   flex-wrap: wrap;
