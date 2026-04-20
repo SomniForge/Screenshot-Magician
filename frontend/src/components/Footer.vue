@@ -3,11 +3,23 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.19-beta'; // Incremented version
+const version = 'v2.0.20-beta'; // Incremented version
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.20-beta',
+        date: 'APR-19-2026',
+        changes: [
+            {
+                type: 'fixed',
+                items: [
+                    'Added a confirmation step before deleting saved projects from the project browser so local work cannot be removed by a single accidental click'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.19-beta',
         date: 'APR-19-2026',

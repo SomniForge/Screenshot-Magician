@@ -242,12 +242,14 @@ const historyEntries = ref<EditorHistoryEntry[]>([]);
 const historyIndex = ref(-1);
 const showProjectsDialog = ref(false);
 const showSaveProjectDialog = ref(false);
+const showDeleteProjectDialog = ref(false);
 const showEffectsDialog = ref(false);
 const showSettingsDialog = ref(false);
 const showKeyboardShortcutsDialog = ref(false);
 const showTutorialDialog = ref(false);
 const showNavigator = ref(true);
 const pendingProjectName = ref('');
+const pendingProjectDelete = ref<{ id: string; name: string } | null>(null);
 const isProjectsLoading = ref(false);
 const showColorDialog = ref(false);
 const customColorHex = ref('#ffffff');
@@ -3613,6 +3615,24 @@ const deleteProject = async (projectId: string) => {
   }
 };
 
+const requestDeleteProject = (projectId: string, projectName: string) => {
+  pendingProjectDelete.value = { id: projectId, name: projectName };
+  showDeleteProjectDialog.value = true;
+};
+
+const closeDeleteProjectDialog = () => {
+  showDeleteProjectDialog.value = false;
+  pendingProjectDelete.value = null;
+};
+
+const confirmDeleteProject = async () => {
+  const targetProject = pendingProjectDelete.value;
+  if (!targetProject) return;
+
+  await deleteProject(targetProject.id);
+  closeDeleteProjectDialog();
+};
+
 // Add this new method to handle the click on drop zone
 const handleDropZoneClick = (event: Event) => {
   if (!droppedImageSrc.value) {
@@ -4814,7 +4834,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                     size="small"
                     variant="text"
                     color="error"
-                    @click="deleteProject(project.id)"
+                    @click="requestDeleteProject(project.id, project.name)"
                   ></v-btn>
                 </div>
               </template>
@@ -4827,6 +4847,31 @@ const preventNativePreviewDrag = (event: DragEvent) => {
         <v-card-actions>
           <v-spacer></v-spacer>
           <v-btn variant="text" @click="showProjectsDialog = false">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="showDeleteProjectDialog" max-width="440">
+      <v-card>
+        <v-card-title class="text-h6">
+          Delete Project?
+        </v-card-title>
+        <v-card-text>
+          <div class="mb-2">
+            This will permanently delete
+            <strong>{{ pendingProjectDelete?.name || 'this project' }}</strong>
+            from local browser storage.
+          </div>
+          <div class="text-caption text-medium-emphasis">
+            This action cannot be undone unless you exported the project to a `.ssmag` file earlier.
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="closeDeleteProjectDialog">Cancel</v-btn>
+          <v-btn color="error" variant="text" @click="confirmDeleteProject">
+            Delete
+          </v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
