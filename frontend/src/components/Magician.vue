@@ -30,7 +30,8 @@ const showNewSessionDialog = ref(false); // Control dialog visibility
 // --- Resizable Chat Panel State ---
 const chatPanelRef = ref<HTMLElement | null>(null);
 const parentRowRef = ref<HTMLElement | null>(null);
-const utilityPanelWidth = ref(320);
+const utilityPanelScrollRef = ref<HTMLElement | null>(null);
+const utilityPanelWidth = ref(352);
 const isResizingChatPanel = ref(false);
 const resizeStartX = ref(0);
 const initialChatPanelBasis = ref(25); // Default basis is 25%
@@ -54,6 +55,9 @@ interface ImageOverlay {
   id: string;
   name: string;
   src: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  maskDataUrl: string | null;
   transform: ChatTransform;
   opacity: number;
   acceptsEffects: boolean;
@@ -167,6 +171,7 @@ interface ImageEffectLayer {
   presetId: string;
   opacity: number;
   seed: number;
+  amount?: number;
 }
 
 interface ImageEffectPreset {
@@ -177,6 +182,13 @@ interface ImageEffectPreset {
   defaultOpacity: number;
   supportsSeed: boolean;
   supportsOpacity?: boolean;
+  kind?: 'overlay' | 'scene';
+  supportsAmount?: boolean;
+  amountLabel?: string;
+  defaultAmount?: number;
+  amountMin?: number;
+  amountMax?: number;
+  amountStep?: number;
 }
 
 interface TutorialStep {
@@ -271,12 +283,19 @@ interface SpacingSnap {
   after: GuideBounds;
 }
 
+type ImageOverlayTool = 'move' | 'erase' | 'restore';
+
 type TemplateRefElement = Element | ComponentPublicInstance | null;
 
 const DEFAULT_CHAT_LINE_WIDTH = 640;
 const HISTORY_LIMIT = 50;
 const HISTORY_COMMIT_DELAY_MS = 250;
 const PROJECT_AUTOSAVE_DELAY_MS = 1200;
+const DEFAULT_IMAGE_MASK_BRUSH_SIZE = 180;
+const DEFAULT_IMAGE_MASK_BRUSH_SOFTNESS = 0.72;
+const DEFAULT_IMAGE_MASK_BRUSH_STRENGTH = 0.78;
+const MIN_IMAGE_MASK_BRUSH_SIZE = 8;
+const MAX_IMAGE_MASK_BRUSH_SIZE = 640;
 const DEFAULT_SELECTED_TEXT = {
   lineIndex: -1,
   startOffset: 0,
@@ -357,6 +376,10 @@ let projectAutosaveTimer: ReturnType<typeof setTimeout> | null = null;
 let editorStatePersistTimer: ReturnType<typeof setTimeout> | null = null;
 let dropzoneScaleAnimationFrame: number | null = null;
 let windowResizeHandler: (() => void) | null = null;
+const imageOverlaySourceImageCache = new Map<string, HTMLImageElement>();
+const imageOverlaySourceImageLoadCache = new Map<string, Promise<HTMLImageElement>>();
+const imageOverlayMaskCanvasMap = new Map<string, HTMLCanvasElement>();
+const imageOverlayMaskSerializeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
@@ -368,6 +391,19 @@ const activeImageDragTarget = ref<'base' | 'overlay'>('base');
 const imageOverlayElementMap = new Map<string, HTMLElement>();
 const pendingImageDragPosition = reactive({ x: 0, y: 0 });
 let imageDragAnimationFrame: number | null = null;
+const imageOverlayTool = ref<ImageOverlayTool>('move');
+const imageMaskBrushSize = ref(DEFAULT_IMAGE_MASK_BRUSH_SIZE);
+const imageMaskBrushSoftness = ref(DEFAULT_IMAGE_MASK_BRUSH_SOFTNESS);
+const imageMaskBrushStrength = ref(DEFAULT_IMAGE_MASK_BRUSH_STRENGTH);
+const isImageMaskPainting = ref(false);
+const activeImageMaskOverlayId = ref<string | null>(null);
+const imageMaskPaintLastPoint = reactive({ x: 0, y: 0 });
+const imageMaskBrushPreview = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  diameter: DEFAULT_IMAGE_MASK_BRUSH_SIZE
+});
 
 // --- Chat Manipulation State ---
 const isChatDraggingEnabled = ref(false);
@@ -628,6 +664,21 @@ const IMAGE_EFFECT_PRESETS: ImageEffectPreset[] = [
     blendMode: 'overlay',
     defaultOpacity: 0.42,
     supportsSeed: true
+  },
+  {
+    id: 'cctv',
+    name: 'CCTV',
+    description: 'Pushes the frame into high-contrast surveillance monochrome with scanlines, noise, and adjustable lens curvature.',
+    blendMode: 'source-over',
+    defaultOpacity: 1,
+    supportsSeed: true,
+    kind: 'scene',
+    supportsAmount: true,
+    amountLabel: 'Lens Curve',
+    defaultAmount: 0.34,
+    amountMin: 0,
+    amountMax: 1,
+    amountStep: 0.01
   }
 ];
 
@@ -775,10 +826,385 @@ const loadCustomColorSwatches = () => {
   }
 };
 
+const loadHtmlImage = (src: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Failed to load image: ${src.slice(0, 64)}`));
+    image.src = src;
+  });
+
+const loadOverlaySourceImage = (src: string) => {
+  const cachedImage = imageOverlaySourceImageCache.get(src);
+  if (cachedImage) {
+    return Promise.resolve(cachedImage);
+  }
+
+  const inflightRequest = imageOverlaySourceImageLoadCache.get(src);
+  if (inflightRequest) {
+    return inflightRequest;
+  }
+
+  const request = loadHtmlImage(src)
+    .then((image) => {
+      imageOverlaySourceImageCache.set(src, image);
+      imageOverlaySourceImageLoadCache.delete(src);
+      return image;
+    })
+    .catch((error) => {
+      imageOverlaySourceImageLoadCache.delete(src);
+      throw error;
+    });
+
+  imageOverlaySourceImageLoadCache.set(src, request);
+  return request;
+};
+
+const hideImageMaskBrushPreview = () => {
+  imageMaskBrushPreview.visible = false;
+};
+
+const resolveTemplateElement = (target: TemplateRefElement | HTMLElement | null) => {
+  if (target instanceof HTMLElement) {
+    return target;
+  }
+
+  if (target && '$el' in target) {
+    const rootElement = target.$el;
+    return rootElement instanceof HTMLElement ? rootElement : null;
+  }
+
+  return null;
+};
+
+const syncImageOverlayIntrinsicSize = (overlay: ImageOverlay, width: number, height: number) => {
+  const safeWidth = Math.max(1, Math.round(width));
+  const safeHeight = Math.max(1, Math.round(height));
+
+  if (overlay.sourceWidth === safeWidth && overlay.sourceHeight === safeHeight) {
+    return;
+  }
+
+  overlay.sourceWidth = safeWidth;
+  overlay.sourceHeight = safeHeight;
+};
+
+const createImageOverlayMaskCanvas = (width: number, height: number) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  return canvas;
+};
+
+const ensureImageOverlayMaskCanvas = (overlay: ImageOverlay, fallbackWidth?: number, fallbackHeight?: number) => {
+  const width = overlay.sourceWidth || fallbackWidth || 1;
+  const height = overlay.sourceHeight || fallbackHeight || 1;
+  const existingCanvas = imageOverlayMaskCanvasMap.get(overlay.id);
+
+  if (existingCanvas && existingCanvas.width === width && existingCanvas.height === height) {
+    return existingCanvas;
+  }
+
+  const maskCanvas = createImageOverlayMaskCanvas(width, height);
+  imageOverlayMaskCanvasMap.set(overlay.id, maskCanvas);
+  return maskCanvas;
+};
+
+const hydrateImageOverlayMaskCanvas = async (overlay: ImageOverlay) => {
+  if (!overlay.maskDataUrl) {
+    return null;
+  }
+
+  const maskCanvas = ensureImageOverlayMaskCanvas(overlay);
+  const ctx = maskCanvas.getContext('2d');
+  if (!ctx) {
+    return null;
+  }
+
+  ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+  try {
+    const maskImage = await loadHtmlImage(overlay.maskDataUrl);
+    ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    ctx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height);
+    return maskCanvas;
+  } catch (error) {
+    console.error('Error hydrating image overlay mask:', error);
+    return null;
+  }
+};
+
+const renderImageOverlayCanvas = async (overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  const element = imageOverlayElementMap.get(overlayId);
+  if (!overlay || !(element instanceof HTMLCanvasElement)) {
+    return;
+  }
+
+  try {
+    const sourceImage = await loadOverlaySourceImage(overlay.src);
+    syncImageOverlayIntrinsicSize(overlay, sourceImage.naturalWidth, sourceImage.naturalHeight);
+
+    if (element.width !== overlay.sourceWidth || element.height !== overlay.sourceHeight) {
+      element.width = overlay.sourceWidth;
+      element.height = overlay.sourceHeight;
+    }
+
+    const ctx = element.getContext('2d');
+    if (!ctx) {
+      return;
+    }
+
+    ctx.clearRect(0, 0, element.width, element.height);
+    ctx.drawImage(sourceImage, 0, 0, element.width, element.height);
+
+    const maskCanvas = imageOverlayMaskCanvasMap.get(overlay.id)
+      ?? (overlay.maskDataUrl ? await hydrateImageOverlayMaskCanvas(overlay) : null);
+
+    if (maskCanvas) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(maskCanvas, 0, 0, element.width, element.height);
+      ctx.restore();
+    }
+  } catch (error) {
+    console.error('Error rendering image overlay canvas:', error);
+  }
+};
+
+const renderImageOverlayCanvasImmediate = (
+  overlay: ImageOverlay,
+  element: HTMLCanvasElement,
+  sourceImage: HTMLImageElement,
+  maskCanvas: HTMLCanvasElement | null
+) => {
+  syncImageOverlayIntrinsicSize(overlay, sourceImage.naturalWidth, sourceImage.naturalHeight);
+
+  if (element.width !== overlay.sourceWidth || element.height !== overlay.sourceHeight) {
+    element.width = overlay.sourceWidth;
+    element.height = overlay.sourceHeight;
+  }
+
+  const ctx = element.getContext('2d');
+  if (!ctx) {
+    return;
+  }
+
+  ctx.clearRect(0, 0, element.width, element.height);
+  ctx.drawImage(sourceImage, 0, 0, element.width, element.height);
+
+  if (maskCanvas) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.drawImage(maskCanvas, 0, 0, element.width, element.height);
+    ctx.restore();
+  }
+};
+
+const renderAllImageOverlayCanvases = () => {
+  imageOverlays.value.forEach((overlay) => {
+    void renderImageOverlayCanvas(overlay.id);
+  });
+};
+
+const serializeImageOverlayMask = (overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  const maskCanvas = imageOverlayMaskCanvasMap.get(overlayId);
+  if (!overlay || !maskCanvas) {
+    return;
+  }
+
+  overlay.maskDataUrl = maskCanvas.toDataURL('image/png');
+};
+
+const scheduleImageOverlayMaskSerialization = (overlayId: string, immediate = false) => {
+  const existingTimer = imageOverlayMaskSerializeTimers.get(overlayId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    imageOverlayMaskSerializeTimers.delete(overlayId);
+  }
+
+  if (immediate) {
+    serializeImageOverlayMask(overlayId);
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    imageOverlayMaskSerializeTimers.delete(overlayId);
+    serializeImageOverlayMask(overlayId);
+  }, 350);
+
+  imageOverlayMaskSerializeTimers.set(overlayId, timer);
+};
+
+const clearImageOverlayMaskRuntimeState = (overlayId: string) => {
+  const serializeTimer = imageOverlayMaskSerializeTimers.get(overlayId);
+  if (serializeTimer) {
+    clearTimeout(serializeTimer);
+    imageOverlayMaskSerializeTimers.delete(overlayId);
+  }
+
+  imageOverlayMaskCanvasMap.delete(overlayId);
+};
+
+const clearImageOverlayRuntimeState = (overlayId: string) => {
+  clearImageOverlayMaskRuntimeState(overlayId);
+  imageOverlayElementMap.delete(overlayId);
+};
+
+const syncImageOverlayRuntimeState = () => {
+  const liveOverlayIds = new Set(imageOverlays.value.map((overlay) => overlay.id));
+
+  Array.from(imageOverlayMaskCanvasMap.keys()).forEach((overlayId) => {
+    if (!liveOverlayIds.has(overlayId)) {
+      clearImageOverlayRuntimeState(overlayId);
+    }
+  });
+
+  Array.from(imageOverlayMaskSerializeTimers.keys()).forEach((overlayId) => {
+    if (!liveOverlayIds.has(overlayId)) {
+      clearImageOverlayRuntimeState(overlayId);
+    }
+  });
+};
+
+const getImageOverlayCanvasPoint = (element: HTMLCanvasElement, clientX: number, clientY: number) => {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+
+  const x = ((clientX - rect.left) / rect.width) * element.width;
+  const y = ((clientY - rect.top) / rect.height) * element.height;
+
+  if (x < 0 || y < 0 || x > element.width || y > element.height) {
+    return null;
+  }
+
+  const dropZoneElement = resolveTemplateElement(dropZoneRef.value);
+  const dropRect = dropZoneElement?.getBoundingClientRect();
+  const interactionScale = getCanvasInteractionScale();
+
+  return {
+    x,
+    y,
+    zoneX: dropRect ? (clientX - dropRect.left) / interactionScale : 0,
+    zoneY: dropRect ? (clientY - dropRect.top) / interactionScale : 0
+  };
+};
+
+const handleImageLayerRailWheel = (event: WheelEvent) => {
+  const utilityScrollElement = utilityPanelScrollRef.value;
+  if (!utilityScrollElement) {
+    return;
+  }
+
+  const deltaY = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? event.deltaY * 16
+    : event.deltaY;
+
+  if (deltaY === 0) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  utilityScrollElement.scrollTop += deltaY;
+};
+
+const updateImageMaskBrushPreview = (overlay: ImageOverlay, zoneX: number, zoneY: number) => {
+  imageMaskBrushPreview.visible = true;
+  imageMaskBrushPreview.x = zoneX;
+  imageMaskBrushPreview.y = zoneY;
+  imageMaskBrushPreview.diameter = imageMaskBrushSize.value * overlay.transform.scale;
+};
+
+const stampImageOverlayMaskBrush = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  softness: number,
+  strength: number,
+  tool: Exclude<ImageOverlayTool, 'move'>
+) => {
+  const innerRadius = radius * (1 - clampImageMaskBrushSoftness(softness));
+  const gradient = ctx.createRadialGradient(x, y, innerRadius, x, y, radius);
+  gradient.addColorStop(0, `rgba(255, 255, 255, ${clampImageMaskBrushStrength(strength)})`);
+  gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+  ctx.save();
+  ctx.globalCompositeOperation = tool === 'erase' ? 'destination-out' : 'source-over';
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+};
+
+const paintImageOverlayMaskSegment = (
+  overlay: ImageOverlay,
+  maskCanvas: HTMLCanvasElement,
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number
+) => {
+  const ctx = maskCanvas.getContext('2d');
+  if (!ctx || imageOverlayTool.value === 'move') {
+    return;
+  }
+
+  const radius = Math.max(1, imageMaskBrushSize.value / 2);
+  const distance = Math.hypot(toX - fromX, toY - fromY);
+  const step = Math.max(1, radius * 0.35);
+  const stampCount = Math.max(1, Math.ceil(distance / step));
+
+  for (let index = 0; index <= stampCount; index += 1) {
+    const progress = stampCount === 0 ? 1 : index / stampCount;
+    stampImageOverlayMaskBrush(
+      ctx,
+      fromX + ((toX - fromX) * progress),
+      fromY + ((toY - fromY) * progress),
+      radius,
+      imageMaskBrushSoftness.value,
+      imageMaskBrushStrength.value,
+      imageOverlayTool.value
+    );
+  }
+
+  const element = imageOverlayElementMap.get(overlay.id);
+  const sourceImage = imageOverlaySourceImageCache.get(overlay.src);
+  if (element instanceof HTMLCanvasElement && sourceImage) {
+    renderImageOverlayCanvasImmediate(overlay, element, sourceImage, maskCanvas);
+  } else {
+    void renderImageOverlayCanvas(overlay.id);
+  }
+  scheduleImageOverlayMaskSerialization(overlay.id);
+};
+
+const finishImageOverlayMaskPainting = () => {
+  if (activeImageMaskOverlayId.value) {
+    scheduleImageOverlayMaskSerialization(activeImageMaskOverlayId.value, true);
+  }
+
+  isImageMaskPainting.value = false;
+  activeImageMaskOverlayId.value = null;
+  hideImageMaskBrushPreview();
+};
+
 // Computed style for the drop zone
 const dropZoneStyle = computed(() => {
   // Calculate scale if needed
   const scale = isScaledDown.value ? dropzoneScale.value : 1;
+  const baseCursor = isImageOverlayBrushActive.value ? 'default' : (isImageDraggingEnabled.value ? (isPanning.value ? 'grabbing' : 'grab') : 'default');
   
   return {
     width: dropZoneWidth.value ? `${dropZoneWidth.value}px` : '800px', 
@@ -791,7 +1217,7 @@ const dropZoneStyle = computed(() => {
     transform: `translate(-50%, -50%) scale(${scale})`,
     transformOrigin: 'center center',
     overflow: 'hidden',
-    cursor: isImageDraggingEnabled.value ? (isPanning.value ? 'grabbing' : 'grab') : 'default',
+    cursor: baseCursor,
     transition: 'transform 0.2s ease',
     border: isScaledDown.value ? '2px solid #42a5f5' : 'none'
   };
@@ -1028,6 +1454,9 @@ const cloneImageOverlay = (overlay: Partial<ImageOverlay>, index: number): Image
   id: overlay.id || createImageOverlayId(),
   name: getImageOverlayName(overlay.name || '', index),
   src: overlay.src || '',
+  sourceWidth: typeof overlay.sourceWidth === 'number' && overlay.sourceWidth > 0 ? overlay.sourceWidth : 0,
+  sourceHeight: typeof overlay.sourceHeight === 'number' && overlay.sourceHeight > 0 ? overlay.sourceHeight : 0,
+  maskDataUrl: typeof overlay.maskDataUrl === 'string' && overlay.maskDataUrl.length > 0 ? overlay.maskDataUrl : null,
   transform: {
     ...createDefaultChatTransform(),
     ...(overlay.transform || {})
@@ -1039,8 +1468,70 @@ const cloneImageOverlay = (overlay: Partial<ImageOverlay>, index: number): Image
 });
 
 const selectImageOverlay = (overlayId: string | null) => {
+  if (overlayId !== activeImageMaskOverlayId.value && activeImageMaskOverlayId.value) {
+    finishImageOverlayMaskPainting();
+  }
+
   activeImageOverlayId.value = overlayId;
   activeImageDragTarget.value = overlayId ? 'overlay' : 'base';
+  hideImageMaskBrushPreview();
+
+  if (overlayId) {
+    void renderImageOverlayCanvas(overlayId);
+  }
+};
+
+const isImageOverlayBrushActive = computed(() =>
+  Boolean(activeImageOverlay.value) && imageOverlayTool.value !== 'move'
+);
+
+const activeImageOverlayHasMask = computed(() => {
+  const overlay = activeImageOverlay.value;
+  if (!overlay) return false;
+
+  return Boolean(overlay.maskDataUrl) || imageOverlayMaskCanvasMap.has(overlay.id);
+});
+
+const shouldPrioritizeActiveImageOverlayInteraction = computed(() =>
+  Boolean(activeImageOverlay.value)
+  && (
+    isImageOverlayBrushActive.value
+    || (isImageDraggingEnabled.value && activeImageDragTarget.value === 'overlay')
+  )
+);
+
+const imageMaskBrushPreviewStyle = computed(() => ({
+  width: `${imageMaskBrushPreview.diameter}px`,
+  height: `${imageMaskBrushPreview.diameter}px`,
+  left: `${imageMaskBrushPreview.x}px`,
+  top: `${imageMaskBrushPreview.y}px`
+}));
+
+const clampImageMaskBrushSize = (size: number) =>
+  Math.min(MAX_IMAGE_MASK_BRUSH_SIZE, Math.max(MIN_IMAGE_MASK_BRUSH_SIZE, Math.round(size)));
+
+const clampImageMaskBrushSoftness = (softness: number) =>
+  Math.min(1, Math.max(0, softness));
+
+const clampImageMaskBrushStrength = (strength: number) =>
+  Math.min(1, Math.max(0.05, strength));
+
+const setImageOverlayTool = (tool: ImageOverlayTool) => {
+  imageOverlayTool.value = tool;
+
+  if (tool === 'move') {
+    if (activeImageOverlay.value) {
+      isImageDraggingEnabled.value = true;
+      isChatDraggingEnabled.value = false;
+    }
+    hideImageMaskBrushPreview();
+    return;
+  }
+
+  isImageDraggingEnabled.value = false;
+  if (isPanning.value) {
+    handleImageMouseUpOrLeave();
+  }
 };
 
 const createImageEffectSeed = () => Math.floor(Math.random() * 2147483647);
@@ -1052,7 +1543,10 @@ const cloneImageEffectLayer = (effect: Partial<ImageEffectLayer>): ImageEffectLa
   return {
     presetId: preset?.id || IMAGE_EFFECT_PRESETS[0].id,
     opacity: typeof effect.opacity === 'number' ? Math.min(1, Math.max(0.05, effect.opacity)) : (preset?.defaultOpacity ?? 0.3),
-    seed: typeof effect.seed === 'number' ? effect.seed : createImageEffectSeed()
+    seed: typeof effect.seed === 'number' ? effect.seed : createImageEffectSeed(),
+    amount: typeof effect.amount === 'number'
+      ? Math.min(preset?.amountMax ?? 1, Math.max(preset?.amountMin ?? 0, effect.amount))
+      : (preset?.defaultAmount ?? 0.35)
   };
 };
 
@@ -1097,6 +1591,16 @@ const setImageEffectOpacity = (presetId: string, opacity: number) => {
   layer.opacity = Math.min(1, Math.max(0.05, opacity));
 };
 
+const setImageEffectAmount = (presetId: string, amount: number) => {
+  const layer = getImageEffectLayer(presetId);
+  const preset = getImageEffectPreset(presetId);
+  if (!layer || !preset) return;
+
+  const min = preset.amountMin ?? 0;
+  const max = preset.amountMax ?? 1;
+  layer.amount = Math.min(max, Math.max(min, amount));
+};
+
 const rerollImageEffect = (presetId: string) => {
   const layer = getImageEffectLayer(presetId);
   if (!layer) return;
@@ -1119,9 +1623,187 @@ const createSeededRandom = (seed: number) => {
   };
 };
 
+const getImageEffectAmount = (effect: ImageEffectLayer, preset: ImageEffectPreset) =>
+  Math.min(preset.amountMax ?? 1, Math.max(preset.amountMin ?? 0, effect.amount ?? preset.defaultAmount ?? 0.35));
+
+const applyCctvSceneEffect = (
+  sourceCanvas: HTMLCanvasElement,
+  effect: ImageEffectLayer,
+  preset: ImageEffectPreset
+) => {
+  const width = sourceCanvas.width;
+  const height = sourceCanvas.height;
+  if (width <= 0 || height <= 0) return sourceCanvas;
+
+  const workingCanvas = document.createElement('canvas');
+  workingCanvas.width = width;
+  workingCanvas.height = height;
+  const workingCtx = workingCanvas.getContext('2d');
+  if (!workingCtx) return sourceCanvas;
+
+  const toneCanvas = document.createElement('canvas');
+  toneCanvas.width = width;
+  toneCanvas.height = height;
+  const toneCtx = toneCanvas.getContext('2d', { willReadFrequently: true });
+  if (!toneCtx) return sourceCanvas;
+
+  toneCtx.filter = 'grayscale(1) contrast(1.22) brightness(0.9) blur(0.35px)';
+  toneCtx.drawImage(sourceCanvas, 0, 0, width, height);
+  toneCtx.filter = 'none';
+
+  const sourceImageData = toneCtx.getImageData(0, 0, width, height);
+  const outputImageData = toneCtx.createImageData(width, height);
+  const sourceData = sourceImageData.data;
+  const outputData = outputImageData.data;
+  const amount = getImageEffectAmount(effect, preset);
+  const easedAmount = amount * amount;
+  const distortionStrength = easedAmount * 0.12;
+  const zoom = 1 - (easedAmount * 0.02);
+  const aspectRatio = width / Math.max(1, height);
+  const maxLensRadius = Math.sqrt((aspectRatio * aspectRatio) + 1);
+
+  for (let y = 0; y < height; y += 1) {
+    const normalizedY = (y / Math.max(1, height - 1)) * 2 - 1;
+    for (let x = 0; x < width; x += 1) {
+      const normalizedX = (x / Math.max(1, width - 1)) * 2 - 1;
+      const lensX = normalizedX * aspectRatio;
+      const lensY = normalizedY;
+      const radius = Math.sqrt((lensX * lensX) + (lensY * lensY));
+      const normalizedRadius = Math.min(1, radius / maxLensRadius);
+      const theta = radius === 0 ? 0 : Math.atan2(lensY, lensX);
+      const remappedRadius = normalizedRadius === 0
+        ? 0
+        : (
+          normalizedRadius
+          * (1 - (distortionStrength * normalizedRadius * normalizedRadius))
+          * zoom
+        ) * maxLensRadius;
+      const sampleLensX = Math.cos(theta) * remappedRadius;
+      const sampleLensY = Math.sin(theta) * remappedRadius;
+      const sampleNormalizedX = sampleLensX / aspectRatio;
+      const sampleNormalizedY = sampleLensY;
+
+      if (
+        Number.isNaN(sampleNormalizedX)
+        || Number.isNaN(sampleNormalizedY)
+        || Math.abs(sampleNormalizedX) > 1
+        || Math.abs(sampleNormalizedY) > 1
+      ) {
+        const targetIndex = ((y * width) + x) * 4;
+        outputData[targetIndex] = 8;
+        outputData[targetIndex + 1] = 8;
+        outputData[targetIndex + 2] = 8;
+        outputData[targetIndex + 3] = 255;
+        continue;
+      }
+
+      const sampleX = ((sampleNormalizedX + 1) * 0.5) * (width - 1);
+      const sampleY = ((sampleNormalizedY + 1) * 0.5) * (height - 1);
+      const sampleXi = Math.max(0, Math.min(width - 1, Math.round(sampleX)));
+      const sampleYi = Math.max(0, Math.min(height - 1, Math.round(sampleY)));
+      const sourceIndex = ((sampleYi * width) + sampleXi) * 4;
+      const targetIndex = ((y * width) + x) * 4;
+
+      outputData[targetIndex] = sourceData[sourceIndex];
+      outputData[targetIndex + 1] = sourceData[sourceIndex + 1];
+      outputData[targetIndex + 2] = sourceData[sourceIndex + 2];
+      outputData[targetIndex + 3] = 255;
+    }
+  }
+
+  workingCtx.putImageData(outputImageData, 0, 0);
+
+  const softenedCanvas = document.createElement('canvas');
+  softenedCanvas.width = width;
+  softenedCanvas.height = height;
+  const softenedCtx = softenedCanvas.getContext('2d');
+  if (softenedCtx) {
+    softenedCtx.filter = `blur(${0.2 + (amount * 0.45)}px)`;
+    softenedCtx.drawImage(workingCanvas, 0, 0, width, height);
+    softenedCtx.filter = 'none';
+    workingCtx.clearRect(0, 0, width, height);
+    workingCtx.drawImage(softenedCanvas, 0, 0, width, height);
+  }
+
+  const random = createSeededRandom(effect.seed);
+  const scanlineGap = 4;
+  for (let y = 0; y < height; y += scanlineGap) {
+    workingCtx.fillStyle = `rgba(0, 0, 0, ${0.06 + (amount * 0.08)})`;
+    workingCtx.fillRect(0, y, width, 1);
+    if ((y / scanlineGap) % 9 === 0) {
+      workingCtx.fillStyle = 'rgba(255, 255, 255, 0.018)';
+      workingCtx.fillRect(0, y + 1, width, 1);
+    }
+  }
+
+  const grainImageData = workingCtx.createImageData(width, height);
+  for (let index = 0; index < grainImageData.data.length; index += 4) {
+    const grainValue = Math.floor(92 + (random() * 54));
+    const alphaValue = Math.floor(4 + (random() * (8 + (amount * 10))));
+    grainImageData.data[index] = grainValue;
+    grainImageData.data[index + 1] = grainValue;
+    grainImageData.data[index + 2] = grainValue;
+    grainImageData.data[index + 3] = alphaValue;
+  }
+
+  const grainCanvas = document.createElement('canvas');
+  grainCanvas.width = width;
+  grainCanvas.height = height;
+  const grainCtx = grainCanvas.getContext('2d');
+  if (grainCtx) {
+    grainCtx.putImageData(grainImageData, 0, 0);
+    workingCtx.save();
+    workingCtx.globalCompositeOperation = 'soft-light';
+    workingCtx.drawImage(grainCanvas, 0, 0, width, height);
+    workingCtx.restore();
+  }
+
+  const bloomBandHeight = Math.max(12, Math.floor(height * 0.04));
+  const bloomY = Math.floor(height * (0.12 + (random() * 0.1)));
+  const bloom = workingCtx.createLinearGradient(0, bloomY, 0, bloomY + bloomBandHeight);
+  bloom.addColorStop(0, 'rgba(255, 255, 255, 0)');
+  bloom.addColorStop(0.45, 'rgba(255, 255, 255, 0.025)');
+  bloom.addColorStop(0.55, 'rgba(255, 255, 255, 0.055)');
+  bloom.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  workingCtx.fillStyle = bloom;
+  workingCtx.fillRect(0, bloomY, width, bloomBandHeight);
+
+  const edgeFalloff = workingCtx.createRadialGradient(
+    width / 2,
+    height / 2,
+    Math.min(width, height) * 0.34,
+    width / 2,
+    height / 2,
+    Math.max(width, height) * 0.74
+  );
+  edgeFalloff.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  edgeFalloff.addColorStop(0.76, 'rgba(0, 0, 0, 0)');
+  edgeFalloff.addColorStop(1, `rgba(0, 0, 0, ${0.08 + (amount * 0.09)})`);
+  workingCtx.fillStyle = edgeFalloff;
+  workingCtx.fillRect(0, 0, width, height);
+
+  if (effect.opacity >= 0.999) {
+    return workingCanvas;
+  }
+
+  const blendedCanvas = document.createElement('canvas');
+  blendedCanvas.width = width;
+  blendedCanvas.height = height;
+  const blendedCtx = blendedCanvas.getContext('2d');
+  if (!blendedCtx) return workingCanvas;
+
+  blendedCtx.drawImage(sourceCanvas, 0, 0, width, height);
+  blendedCtx.globalAlpha = Math.min(1, Math.max(0.05, effect.opacity));
+  blendedCtx.drawImage(workingCanvas, 0, 0, width, height);
+  blendedCtx.globalAlpha = 1;
+
+  return blendedCanvas;
+};
+
 const buildImageEffectCanvas = (effect: ImageEffectLayer, width: number, height: number) => {
   const preset = getImageEffectPreset(effect.presetId);
   if (!preset || width <= 0 || height <= 0) return null;
+  if (preset.kind === 'scene') return null;
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -1312,6 +1994,106 @@ const buildImageEffectCanvas = (effect: ImageEffectLayer, width: number, height:
   return canvas;
 };
 
+const hasSceneImageEffects = computed(() =>
+  activeImageEffectLayers.value.some(({ preset }) => preset.kind === 'scene')
+);
+
+const buildAffectedSceneCanvas = async () => {
+  if (!droppedImageSrc.value) return null;
+
+  const width = dropZoneWidth.value || 800;
+  const height = dropZoneHeight.value || 600;
+  if (width <= 0 || height <= 0) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, width, height);
+
+  const baseImage = await loadHtmlImage(droppedImageSrc.value);
+  const viewportRatio = width / height;
+  const imageRatio = baseImage.naturalWidth / baseImage.naturalHeight;
+  let drawWidth: number;
+  let drawHeight: number;
+  let offsetX: number;
+  let offsetY: number;
+
+  if (imageRatio > viewportRatio) {
+    drawWidth = width;
+    drawHeight = width / imageRatio;
+    offsetX = 0;
+    offsetY = (height - drawHeight) / 2;
+  } else {
+    drawHeight = height;
+    drawWidth = height * imageRatio;
+    offsetX = (width - drawWidth) / 2;
+    offsetY = 0;
+  }
+
+  ctx.save();
+  ctx.translate(width / 2, height / 2);
+  ctx.translate(imageTransform.x, imageTransform.y);
+  ctx.scale(imageTransform.scale, imageTransform.scale);
+  ctx.drawImage(
+    baseImage,
+    offsetX - (width / 2),
+    offsetY - (height / 2),
+    drawWidth,
+    drawHeight
+  );
+  ctx.restore();
+
+  for (const overlay of effectAwareImageOverlays.value.affected) {
+    const overlayCanvas = await buildMaskedImageOverlayCanvas(overlay);
+    if (!overlayCanvas) continue;
+
+    ctx.save();
+    ctx.globalAlpha = overlay.opacity;
+    ctx.translate(overlay.transform.x, overlay.transform.y);
+    ctx.scale(overlay.transform.scale, overlay.transform.scale);
+    ctx.drawImage(overlayCanvas, 0, 0);
+    ctx.restore();
+  }
+
+  return canvas;
+};
+
+const applyImageEffectsToSceneCanvas = async (sceneCanvas: HTMLCanvasElement) => {
+  let workingCanvas = sceneCanvas;
+
+  for (const { effect, preset } of activeImageEffectLayers.value) {
+    if (preset.kind === 'scene') {
+      if (preset.id === 'cctv') {
+        workingCanvas = applyCctvSceneEffect(workingCanvas, effect, preset);
+      }
+      continue;
+    }
+
+    const effectCanvas = buildImageEffectCanvas(effect, workingCanvas.width, workingCanvas.height);
+    if (!effectCanvas) continue;
+
+    const compositedCanvas = document.createElement('canvas');
+    compositedCanvas.width = workingCanvas.width;
+    compositedCanvas.height = workingCanvas.height;
+    const compositedCtx = compositedCanvas.getContext('2d');
+    if (!compositedCtx) continue;
+
+    compositedCtx.drawImage(workingCanvas, 0, 0, workingCanvas.width, workingCanvas.height);
+    compositedCtx.save();
+    compositedCtx.globalAlpha = effect.opacity;
+    compositedCtx.globalCompositeOperation = preset.blendMode;
+    compositedCtx.drawImage(effectCanvas, 0, 0, workingCanvas.width, workingCanvas.height);
+    compositedCtx.restore();
+    workingCanvas = compositedCanvas;
+  }
+
+  return workingCanvas;
+};
+
 const activeImageEffectLayers = computed(() =>
   imageEffects.value
     .map((effect) => {
@@ -1329,19 +2111,48 @@ const activeImageEffectLayers = computed(() =>
 
 const imageEffectPreviewCache = new Map<string, string>();
 const activeImageEffectPreviews = shallowRef<ImageEffectPreviewEntry[]>([]);
+const sceneImageEffectPreviewDataUrl = ref<string | null>(null);
+const isSceneImageEffectPreviewRefreshing = ref(false);
+let sceneImageEffectPreviewRefreshToken = 0;
 
-const refreshImageEffectPreviews = () => {
+const refreshImageEffectPreviews = async () => {
+  const refreshToken = ++sceneImageEffectPreviewRefreshToken;
+
   if (!droppedImageSrc.value) {
     activeImageEffectPreviews.value = [];
+    sceneImageEffectPreviewDataUrl.value = null;
+    isSceneImageEffectPreviewRefreshing.value = false;
     return;
   }
 
   const width = dropZoneWidth.value || 800;
   const height = dropZoneHeight.value || 600;
 
+  if (hasSceneImageEffects.value) {
+    isSceneImageEffectPreviewRefreshing.value = true;
+    const sceneCanvas = await buildAffectedSceneCanvas();
+    if (!sceneCanvas) {
+      if (refreshToken !== sceneImageEffectPreviewRefreshToken) return;
+      activeImageEffectPreviews.value = [];
+      sceneImageEffectPreviewDataUrl.value = null;
+      isSceneImageEffectPreviewRefreshing.value = false;
+      return;
+    }
+
+    const processedSceneCanvas = await applyImageEffectsToSceneCanvas(sceneCanvas);
+    if (refreshToken !== sceneImageEffectPreviewRefreshToken) return;
+    sceneImageEffectPreviewDataUrl.value = processedSceneCanvas.toDataURL('image/png');
+    activeImageEffectPreviews.value = [];
+    isSceneImageEffectPreviewRefreshing.value = false;
+    return;
+  }
+
+  isSceneImageEffectPreviewRefreshing.value = false;
+  sceneImageEffectPreviewDataUrl.value = null;
+
   activeImageEffectPreviews.value = activeImageEffectLayers.value
     .map(({ effect, preset }) => {
-      const cacheKey = `${preset.id}:${effect.seed}:${width}x${height}`;
+      const cacheKey = `${preset.id}:${effect.seed}:${effect.amount ?? ''}:${width}x${height}`;
       let dataUrl = imageEffectPreviewCache.get(cacheKey);
 
       if (!dataUrl) {
@@ -1361,7 +2172,9 @@ const refreshImageEffectPreviews = () => {
     .filter((entry): entry is ImageEffectPreviewEntry => entry !== null);
 };
 
-watch([droppedImageSrc, imageEffects, dropZoneWidth, dropZoneHeight], refreshImageEffectPreviews, {
+watch([droppedImageSrc, imageEffects, dropZoneWidth, dropZoneHeight, () => ({ ...imageTransform }), imageOverlays], () => {
+  void refreshImageEffectPreviews();
+}, {
   deep: true,
   immediate: true
 });
@@ -1376,6 +2189,36 @@ const getImageEffectPreviewStyle = (entry: ImageEffectPreviewEntry) => ({
   opacity: entry.effect.opacity,
   mixBlendMode: entry.preset.blendMode,
   zIndex: 100
+});
+
+const sceneImageEffectPreviewStyle = computed(() => ({
+  position: 'absolute' as const,
+  inset: '0',
+  width: '100%',
+  height: '100%',
+  objectFit: 'fill' as const,
+  pointerEvents: 'none' as const,
+  zIndex: 90
+}));
+
+const shouldShowSceneImageEffectPreview = computed(() => {
+  if (!sceneImageEffectPreviewDataUrl.value) {
+    return false;
+  }
+
+  if (isSceneImageEffectPreviewRefreshing.value) {
+    return false;
+  }
+
+  if (!isPanning.value) {
+    return true;
+  }
+
+  if (activeImageDragTarget.value === 'base') {
+    return false;
+  }
+
+  return !(activeImageOverlay.value?.acceptsEffects ?? false);
 });
 
 const normalizeHexColor = (value: string, fallback: string) => {
@@ -1977,6 +2820,7 @@ const projectStatusMessage = computed(() => {
 });
 
 const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
+  imageOverlays.value.forEach((overlay) => clearImageOverlayRuntimeState(overlay.id));
   characterName.value = snapshot.characterName || '';
   chatlogText.value = snapshot.chatlogText || '';
   droppedImageSrc.value = snapshot.droppedImageSrc || null;
@@ -2003,7 +2847,11 @@ const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
     : [];
   activeChatOverlayId.value = snapshot.activeChatOverlayId || chatOverlays.value[0]?.id || null;
   syncEditorFromActiveOverlay();
+  syncImageOverlayRuntimeState();
   renderKey.value++;
+  void nextTick(() => {
+    renderAllImageOverlayCanvases();
+  });
 };
 
 const openProjectsDb = () =>
@@ -2492,13 +3340,21 @@ const setBaseImageFromDataUrl = (src: string) => {
 
 const addImageOverlayFromFile = async (file: File, src: string) => {
   const overlayIndex = imageOverlays.value.length;
-  const placement = await new Promise<{ x: number; y: number; scale: number }>((resolve) => {
+  const overlayMetrics = await new Promise<{ x: number; y: number; scale: number; width: number; height: number }>((resolve) => {
     const overlayImage = new Image();
     overlayImage.onload = () => {
-      resolve(getInitialImageOverlayPlacement(overlayImage.naturalWidth, overlayImage.naturalHeight, overlayIndex));
+      resolve({
+        ...getInitialImageOverlayPlacement(overlayImage.naturalWidth, overlayImage.naturalHeight, overlayIndex),
+        width: overlayImage.naturalWidth,
+        height: overlayImage.naturalHeight
+      });
     };
     overlayImage.onerror = () => {
-      resolve(getInitialImageOverlayPlacement(0, 0, overlayIndex));
+      resolve({
+        ...getInitialImageOverlayPlacement(0, 0, overlayIndex),
+        width: 0,
+        height: 0
+      });
     };
     overlayImage.src = src;
   });
@@ -2507,7 +3363,14 @@ const addImageOverlayFromFile = async (file: File, src: string) => {
     id: createImageOverlayId(),
     name: file.name.replace(/\.[^.]+$/, ''),
     src,
-    transform: placement,
+    sourceWidth: overlayMetrics.width,
+    sourceHeight: overlayMetrics.height,
+    maskDataUrl: null,
+    transform: {
+      x: overlayMetrics.x,
+      y: overlayMetrics.y,
+      scale: overlayMetrics.scale
+    },
     opacity: 1,
     acceptsEffects: true,
     isHidden: false,
@@ -2518,6 +3381,7 @@ const addImageOverlayFromFile = async (file: File, src: string) => {
   selectImageOverlay(overlay.id);
   isImageDraggingEnabled.value = true;
   isChatDraggingEnabled.value = false;
+  imageOverlayTool.value = 'move';
 
   trackEvent('import_image_overlay', {
     file_extension: file.name.split('.').pop()?.toLowerCase() || 'unknown',
@@ -3035,8 +3899,9 @@ const applySmartGuides = (
 };
 
 const setImageOverlayElement = (overlayId: string, element: TemplateRefElement) => {
-  if (element instanceof HTMLElement) {
+  if (element instanceof HTMLCanvasElement) {
     imageOverlayElementMap.set(overlayId, element);
+    void renderImageOverlayCanvas(overlayId);
     return;
   }
 
@@ -3245,6 +4110,9 @@ const handleWheel = (event: WheelEvent) => {
 // --- Toolbar Button Handlers ---
 const toggleImageDrag = () => {
   isImageDraggingEnabled.value = !isImageDraggingEnabled.value;
+  if (isImageDraggingEnabled.value) {
+    imageOverlayTool.value = 'move';
+  }
   if (isImageDraggingEnabled.value && isChatDraggingEnabled.value) {
     isChatDraggingEnabled.value = false; // Disable chat drag if enabling image drag
   }
@@ -3260,8 +4128,106 @@ const enableImageDragFromCanvas = (event: MouseEvent) => {
   event.preventDefault();
   event.stopPropagation();
   selectImageOverlay(null);
+  imageOverlayTool.value = 'move';
   isImageDraggingEnabled.value = true;
   isChatDraggingEnabled.value = false;
+};
+
+const handleImageOverlayMaskPointerMove = (event: PointerEvent) => {
+  const overlayId = activeImageMaskOverlayId.value;
+  if (!overlayId) return;
+
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  const element = imageOverlayElementMap.get(overlayId);
+  if (!overlay || !(element instanceof HTMLCanvasElement)) {
+    finishImageOverlayMaskPainting();
+    hideImageMaskBrushPreview();
+    return;
+  }
+
+  const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
+  if (!point) {
+    hideImageMaskBrushPreview();
+    return;
+  }
+
+  paintImageOverlayMaskSegment(
+    overlay,
+    ensureImageOverlayMaskCanvas(overlay, element.width, element.height),
+    imageMaskPaintLastPoint.x,
+    imageMaskPaintLastPoint.y,
+    point.x,
+    point.y
+  );
+
+  imageMaskPaintLastPoint.x = point.x;
+  imageMaskPaintLastPoint.y = point.y;
+  updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
+};
+
+const startImageOverlayMaskPainting = (event: PointerEvent, overlay: ImageOverlay) => {
+  const element = imageOverlayElementMap.get(overlay.id);
+  if (!(element instanceof HTMLCanvasElement)) {
+    return;
+  }
+
+  const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
+  if (!point) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  activeImageMaskOverlayId.value = overlay.id;
+  isImageMaskPainting.value = true;
+  imageMaskPaintLastPoint.x = point.x;
+  imageMaskPaintLastPoint.y = point.y;
+  updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
+
+  paintImageOverlayMaskSegment(
+    overlay,
+    ensureImageOverlayMaskCanvas(overlay, element.width, element.height),
+    point.x,
+    point.y,
+    point.x,
+    point.y
+  );
+
+  beginCapturedCanvasDrag(event, handleImageOverlayMaskPointerMove, () => {
+    finishImageOverlayMaskPainting();
+    hideImageMaskBrushPreview();
+  });
+};
+
+const handleImageOverlayPointerMove = (event: PointerEvent, overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  const element = imageOverlayElementMap.get(overlayId);
+  if (!overlay || !(element instanceof HTMLCanvasElement)) {
+    hideImageMaskBrushPreview();
+    return;
+  }
+
+  if (!isImageOverlayBrushActive.value || activeImageOverlayId.value !== overlayId || overlay.isLocked) {
+    hideImageMaskBrushPreview();
+    return;
+  }
+
+  const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
+  if (!point) {
+    hideImageMaskBrushPreview();
+    return;
+  }
+
+  updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
+};
+
+const handleImageOverlayPointerLeave = (overlayId: string) => {
+  if (activeImageMaskOverlayId.value === overlayId && isImageMaskPainting.value) {
+    return;
+  }
+
+  hideImageMaskBrushPreview();
 };
 
 const handleImageOverlayMouseDown = (event: PointerEvent, overlayId: string) => {
@@ -3269,6 +4235,12 @@ const handleImageOverlayMouseDown = (event: PointerEvent, overlayId: string) => 
   if (!overlay) return;
 
   if (activeImageOverlayId.value !== overlayId) {
+    return;
+  }
+
+  if (isImageOverlayBrushActive.value) {
+    if (overlay.isLocked) return;
+    startImageOverlayMaskPainting(event, overlay);
     return;
   }
 
@@ -3295,16 +4267,33 @@ const enableImageOverlayDragFromCanvas = (event: MouseEvent, overlayId: string) 
   event.preventDefault();
   event.stopPropagation();
   selectImageOverlay(overlayId);
+  imageOverlayTool.value = 'move';
   isImageDraggingEnabled.value = true;
   isChatDraggingEnabled.value = false;
 };
 
 const handleImageOverlayWheel = (event: WheelEvent, overlayId: string) => {
   const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay || !isImageDraggingEnabled.value) return;
+  if (!overlay) return;
 
   event.preventDefault();
   event.stopPropagation();
+
+  if (isImageOverlayBrushActive.value && activeImageOverlayId.value === overlayId) {
+    imageMaskBrushSize.value = clampImageMaskBrushSize(
+      imageMaskBrushSize.value + (event.deltaY < 0 ? 14 : -14)
+    );
+    const element = imageOverlayElementMap.get(overlayId);
+    if (element instanceof HTMLCanvasElement) {
+      const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
+      if (point) {
+        updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
+      }
+    }
+    return;
+  }
+
+  if (!isImageDraggingEnabled.value) return;
 
   if (overlay.isLocked || activeImageOverlayId.value !== overlayId) {
     return;
@@ -3517,19 +4506,27 @@ const handleResizeMouseUp = () => {
 const getImageOverlayStyles = (overlay: ImageOverlay) => {
   const isActiveOverlay = activeImageOverlayId.value === overlay.id;
   const overlayIndex = imageOverlays.value.findIndex((item) => item.id === overlay.id);
+  const isBrushTarget = isActiveOverlay && isImageOverlayBrushActive.value;
 
   return {
     position: 'absolute' as const,
     top: '0',
     left: '0',
+    display: 'block',
+    width: `${overlay.sourceWidth || 1}px`,
+    height: `${overlay.sourceHeight || 1}px`,
     maxWidth: 'none',
     maxHeight: 'none',
+    pointerEvents: 'auto' as const,
+    touchAction: 'none' as const,
     transformOrigin: 'top left',
     transform: `translate(${overlay.transform.x}px, ${overlay.transform.y}px) scale(${overlay.transform.scale})`,
     opacity: String(overlay.opacity),
     willChange: isPanning.value && isActiveOverlay ? 'transform' : 'auto',
     cursor: overlay.isLocked
       ? 'not-allowed'
+      : isBrushTarget
+        ? 'crosshair'
       : isImageDraggingEnabled.value
         ? (isActiveOverlay && isPanning.value ? 'grabbing' : 'grab')
         : 'pointer',
@@ -3568,6 +4565,9 @@ const duplicateImageOverlay = (overlayId: string) => {
 
   imageOverlays.value.push(duplicatedOverlay);
   selectImageOverlay(duplicatedOverlay.id);
+  void nextTick(() => {
+    void renderImageOverlayCanvas(duplicatedOverlay.id);
+  });
 };
 
 const removeImageOverlay = (overlayId: string) => {
@@ -3579,6 +4579,11 @@ const removeImageOverlay = (overlayId: string) => {
   }
 
   imageOverlays.value.splice(overlayIndex, 1);
+  clearImageOverlayRuntimeState(overlayId);
+  if (activeImageMaskOverlayId.value === overlayId) {
+    finishImageOverlayMaskPainting();
+    hideImageMaskBrushPreview();
+  }
 
   if (activeImageOverlayId.value === overlayId) {
     const nextOverlay = imageOverlays.value[Math.max(0, overlayIndex - 1)] ?? imageOverlays.value[0] ?? null;
@@ -3595,6 +4600,11 @@ const toggleImageOverlayVisibility = (overlayId: string) => {
   if (overlay.isHidden && activeImageOverlayId.value === overlayId && isPanning.value) {
     handleImageMouseUpOrLeave();
   }
+
+  if (overlay.isHidden && activeImageMaskOverlayId.value === overlayId) {
+    finishImageOverlayMaskPainting();
+    hideImageMaskBrushPreview();
+  }
 };
 
 const toggleImageOverlayLock = (overlayId: string) => {
@@ -3605,6 +4615,11 @@ const toggleImageOverlayLock = (overlayId: string) => {
 
   if (overlay.isLocked && isPanning.value && activeImageOverlayId.value === overlayId) {
     handleImageMouseUpOrLeave();
+  }
+
+  if (overlay.isLocked && activeImageMaskOverlayId.value === overlayId) {
+    finishImageOverlayMaskPainting();
+    hideImageMaskBrushPreview();
   }
 };
 
@@ -3623,10 +4638,20 @@ const resetActiveImageOverlayView = () => {
   activeImageOverlay.value.transform.scale = 1;
 };
 
+const resetActiveImageOverlayMask = () => {
+  const overlay = activeImageOverlay.value;
+  if (!overlay) return;
+
+  overlay.maskDataUrl = null;
+  clearImageOverlayMaskRuntimeState(overlay.id);
+  void renderImageOverlayCanvas(overlay.id);
+};
+
 // Update chat overlay styles
 const getChatStyles = (overlay: ChatOverlay) => {
   const isActiveOverlay = activeChatOverlayId.value === overlay.id;
   const overlayIndex = chatOverlays.value.findIndex((item) => item.id === overlay.id);
+  const shouldYieldToActiveImageOverlay = shouldPrioritizeActiveImageOverlayInteraction.value;
 
   return {
     position: 'absolute' as const,
@@ -3640,12 +4665,14 @@ const getChatStyles = (overlay: ChatOverlay) => {
     lineHeight: '16px',
     transform: `translate(${overlay.transform.x}px, ${overlay.transform.y}px) scale(${overlay.transform.scale})`,
     transformOrigin: 'top left',
-    pointerEvents: 'auto' as const,
+    pointerEvents: shouldYieldToActiveImageOverlay ? 'none' as const : 'auto' as const,
     wordWrap: 'break-word' as const,
     whiteSpace: 'pre-wrap' as const,
     opacity: overlay.isHidden ? '0.45' : '1',
     cursor: overlay.isLocked
       ? 'not-allowed'
+      : shouldYieldToActiveImageOverlay
+        ? 'default'
       : isChatDraggingEnabled.value
         ? (isActiveOverlay && isChatPanning.value ? 'grabbing' : 'grab')
         : 'pointer',
@@ -3653,6 +4680,33 @@ const getChatStyles = (overlay: ChatOverlay) => {
     outlineOffset: '2px',
     zIndex: 300 + Math.max(overlayIndex, 0)
   };
+};
+
+const buildMaskedImageOverlayCanvas = async (overlay: ImageOverlay) => {
+  const sourceImage = await loadOverlaySourceImage(overlay.src);
+  syncImageOverlayIntrinsicSize(overlay, sourceImage.naturalWidth, sourceImage.naturalHeight);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = overlay.sourceWidth || sourceImage.naturalWidth;
+  canvas.height = overlay.sourceHeight || sourceImage.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return null;
+  }
+
+  ctx.drawImage(sourceImage, 0, 0, canvas.width, canvas.height);
+
+  const maskCanvas = imageOverlayMaskCanvasMap.get(overlay.id)
+    ?? (overlay.maskDataUrl ? await hydrateImageOverlayMaskCanvas(overlay) : null);
+
+  if (maskCanvas) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  }
+
+  return canvas;
 };
 
 const effectAwareImageOverlays = computed(() => {
@@ -3686,69 +4740,32 @@ const saveImage = async () => {
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Draw the image with correct positioning and transform origin
-    ctx.save();
-    const img = new Image();
-    img.src = droppedImageSrc.value;
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-    });
-
-    // --- Match CSS object-fit: contain ---
-    const viewportRatio = canvas.width / canvas.height;
-    const imageRatio = img.naturalWidth / img.naturalHeight;
-    let drawWidth, drawHeight, offsetX, offsetY;
-
-    if (imageRatio > viewportRatio) {
-      // Image is wider than canvas aspect ratio (letterboxed top/bottom)
-      drawWidth = canvas.width;
-      drawHeight = canvas.width / imageRatio;
-      offsetX = 0;
-      offsetY = (canvas.height - drawHeight) / 2;
-    } else {
-      // Image is taller than canvas aspect ratio (pillarboxed left/right)
-      drawHeight = canvas.height;
-      drawWidth = canvas.height * imageRatio;
-      offsetX = (canvas.width - drawWidth) / 2;
-      offsetY = 0;
-    }
-
-    // Match the preview image element exactly:
-    // the image fills the whole drop zone, uses object-fit: contain, and transforms
-    // around the center of the full drop zone rather than the contained image bounds.
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.translate(imageTransform.x, imageTransform.y);
-    ctx.scale(imageTransform.scale, imageTransform.scale);
-    ctx.drawImage(
-      img,
-      offsetX - canvas.width / 2,
-      offsetY - canvas.height / 2,
-      drawWidth,
-      drawHeight
-    );
-
-    ctx.restore(); // Restore context after drawing image
-
     const drawOverlayCollection = async (overlays: ImageOverlay[]) => {
       for (const overlay of overlays) {
-        const overlayImage = new Image();
-        overlayImage.src = overlay.src;
-        await new Promise((resolve, reject) => {
-          overlayImage.onload = resolve;
-          overlayImage.onerror = reject;
-        });
+        const overlayCanvas = await buildMaskedImageOverlayCanvas(overlay);
+        if (!overlayCanvas) continue;
 
         ctx.save();
         ctx.globalAlpha = overlay.opacity;
         ctx.translate(overlay.transform.x, overlay.transform.y);
         ctx.scale(overlay.transform.scale, overlay.transform.scale);
-        ctx.drawImage(overlayImage, 0, 0);
+        ctx.drawImage(overlayCanvas, 0, 0);
         ctx.restore();
       }
     };
 
-    const drawActiveImageEffects = () => {
+    if (hasSceneImageEffects.value) {
+      const affectedSceneCanvas = await buildAffectedSceneCanvas();
+      if (affectedSceneCanvas) {
+        const processedSceneCanvas = await applyImageEffectsToSceneCanvas(affectedSceneCanvas);
+        ctx.drawImage(processedSceneCanvas, 0, 0, canvas.width, canvas.height);
+      }
+    } else {
+      const affectedSceneCanvas = await buildAffectedSceneCanvas();
+      if (affectedSceneCanvas) {
+        ctx.drawImage(affectedSceneCanvas, 0, 0, canvas.width, canvas.height);
+      }
+
       activeImageEffectLayers.value.forEach(({ effect, preset }) => {
         const effectCanvas = buildImageEffectCanvas(effect, canvas.width, canvas.height);
         if (!effectCanvas) return;
@@ -3759,12 +4776,8 @@ const saveImage = async () => {
         ctx.drawImage(effectCanvas, 0, 0, canvas.width, canvas.height);
         ctx.restore();
       });
-    };
-
-    await drawOverlayCollection(effectAwareImageOverlays.value.affected);
-    if (activeImageEffectLayers.value.length > 0) {
-      drawActiveImageEffects();
     }
+
     await drawOverlayCollection(effectAwareImageOverlays.value.unaffected);
 
     const visibleChatOverlays = chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0);
@@ -3961,10 +4974,15 @@ const resetSession = () => {
   imageTransform.x = 0;
   imageTransform.y = 0;
   imageTransform.scale = 1;
+  imageOverlays.value.forEach((overlay) => clearImageOverlayRuntimeState(overlay.id));
   imageOverlays.value = [];
   activeImageOverlayId.value = null;
   activeImageDragTarget.value = 'base';
   imageEffects.value = [];
+  imageOverlayTool.value = 'move';
+  activeImageMaskOverlayId.value = null;
+  isImageMaskPainting.value = false;
+  hideImageMaskBrushPreview();
   
   // Reset image dragging state
   isImageDraggingEnabled.value = false;
@@ -4452,6 +5470,23 @@ watch([currentProjectId, currentProjectName], () => {
   scheduleEditorStatePersist();
 });
 
+watch(
+  () => imageOverlays.value.map((overlay) => ({
+    id: overlay.id,
+    src: overlay.src,
+    maskDataUrl: overlay.maskDataUrl,
+    sourceWidth: overlay.sourceWidth,
+    sourceHeight: overlay.sourceHeight
+  })),
+  () => {
+    syncImageOverlayRuntimeState();
+    void nextTick(() => {
+      renderAllImageOverlayCanvases();
+    });
+  },
+  { deep: true }
+);
+
 // Load saved state when component mounts
 onMounted(() => {
   unsavedNavigationStore.setEditorMounted(true);
@@ -4477,6 +5512,9 @@ onMounted(() => {
   };
   window.addEventListener('resize', windowResizeHandler);
   scheduleDropzoneScaleCalculation();
+  void nextTick(() => {
+    renderAllImageOverlayCanvases();
+  });
 });
 
 onUnmounted(() => {
@@ -4498,6 +5536,9 @@ onUnmounted(() => {
   if (chatDragAnimationFrame !== null) {
     window.cancelAnimationFrame(chatDragAnimationFrame);
   }
+  imageOverlayMaskSerializeTimers.forEach((timer) => clearTimeout(timer));
+  imageOverlayMaskSerializeTimers.clear();
+  imageOverlayMaskCanvasMap.clear();
   activeCanvasDragCleanup?.();
   window.removeEventListener('beforeunload', handleBeforeUnload);
   window.removeEventListener('keydown', handleEditorHistoryKeydown);
@@ -4537,6 +5578,27 @@ watch(smartGuideStrength, (value) => {
   }
 
   window.localStorage.setItem(SMART_GUIDE_STRENGTH_STORAGE_KEY, String(clampedValue));
+});
+
+watch(imageMaskBrushSize, (value) => {
+  const clampedValue = clampImageMaskBrushSize(value);
+  if (clampedValue !== value) {
+    imageMaskBrushSize.value = clampedValue;
+  }
+});
+
+watch(imageMaskBrushSoftness, (value) => {
+  const clampedValue = clampImageMaskBrushSoftness(value);
+  if (clampedValue !== value) {
+    imageMaskBrushSoftness.value = clampedValue;
+  }
+});
+
+watch(imageMaskBrushStrength, (value) => {
+  const clampedValue = clampImageMaskBrushStrength(value);
+  if (clampedValue !== value) {
+    imageMaskBrushStrength.value = clampedValue;
+  }
 });
 
 watch(() => getSnapshotSignature(), () => {
@@ -5916,6 +6978,24 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                   ></v-btn>
                 </div>
               </div>
+
+              <div v-if="getImageEffectLayer(preset.id) && preset.supportsAmount" class="mt-4">
+                <div class="d-flex align-center justify-space-between mb-2">
+                  <span class="text-caption text-medium-emphasis">{{ preset.amountLabel || 'Amount' }}</span>
+                  <span class="text-caption text-medium-emphasis">
+                    {{ Math.round((getImageEffectLayer(preset.id)?.amount ?? preset.defaultAmount ?? 0) * 100) }}%
+                  </span>
+                </div>
+                <v-slider
+                  :model-value="getImageEffectLayer(preset.id)?.amount ?? preset.defaultAmount ?? 0.35"
+                  :min="preset.amountMin ?? 0"
+                  :max="preset.amountMax ?? 1"
+                  :step="preset.amountStep ?? 0.01"
+                  hide-details
+                  color="primary"
+                  @update:model-value="setImageEffectAmount(preset.id, Number($event))"
+                ></v-slider>
+              </div>
             </v-card-text>
           </v-card>
         </div>
@@ -6118,228 +7198,233 @@ const preventNativePreviewDrag = (event: DragEvent) => {
     <div class="layout-container pa-2" ref="parentRowRef">
       <div class="utility-panel" :style="{ width: `${utilityPanelWidth}px` }">
         <v-sheet class="utility-panel-sheet fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
-          <div class="project-status mb-3">
-            <div class="text-subtitle-2">Project</div>
-            <div class="text-body-2">
-              {{ currentProjectName || 'Unsaved session' }}
-            </div>
-            <div
-              class="text-caption text-medium-emphasis project-status-message"
-              :title="projectStatusMessage"
-            >
-              {{ projectStatusMessage }}
-            </div>
-          </div>
-          <v-sheet
-            v-if="showImageMinimap && droppedImageSrc"
-            class="image-minimap mb-3"
-            border
-            rounded="lg"
-          >
-            <div class="image-minimap-header">
-              <div>
-                <div class="text-subtitle-2">Navigator</div>
-                <div class="text-caption text-medium-emphasis">
-                  Click anywhere in the preview to recenter the screenshot.
-                </div>
+          <div ref="utilityPanelScrollRef" class="utility-panel-scroll">
+            <div class="project-status mb-3">
+              <div class="text-subtitle-2">Project</div>
+              <div class="text-body-2">
+                {{ currentProjectName || 'Unsaved session' }}
               </div>
-              <v-btn
-                size="x-small"
-                variant="text"
-                icon="mdi-fit-to-screen-outline"
-                @click="resetImageView"
-              ></v-btn>
+              <div
+                class="text-caption text-medium-emphasis project-status-message"
+                :title="projectStatusMessage"
+              >
+                {{ projectStatusMessage }}
+              </div>
             </div>
-            <div
-              ref="minimapRef"
-              class="image-minimap-frame"
-              :style="{ width: `${minimapSize.width}px`, height: `${minimapSize.height}px` }"
-              @click="recenterImageFromMinimap"
+            <v-sheet
+              v-if="showImageMinimap && droppedImageSrc"
+              class="image-minimap mb-3"
+              border
+              rounded="lg"
             >
+              <div class="image-minimap-header">
+                <div>
+                  <div class="text-subtitle-2">Navigator</div>
+                  <div class="text-caption text-medium-emphasis">
+                    Click anywhere in the preview to recenter the screenshot.
+                  </div>
+                </div>
+                <v-btn
+                  size="x-small"
+                  variant="text"
+                  icon="mdi-fit-to-screen-outline"
+                  @click="resetImageView"
+                ></v-btn>
+              </div>
+              <div
+                ref="minimapRef"
+                class="image-minimap-frame"
+                :style="{ width: `${minimapSize.width}px`, height: `${minimapSize.height}px` }"
+                @click="recenterImageFromMinimap"
+              >
               <img
                 :src="droppedImageSrc"
                 alt="Navigator preview"
                 class="image-minimap-preview"
               />
+                <div
+                  class="image-minimap-viewport"
+                  :style="{
+                    left: `${minimapViewport.left}px`,
+                    top: `${minimapViewport.top}px`,
+                    width: `${minimapViewport.width}px`,
+                    height: `${minimapViewport.height}px`
+                  }"
+                ></div>
+              </div>
+            </v-sheet>
+            <div class="utility-panel-main">
+              <div class="utility-panel-section-header d-flex align-center justify-space-between mb-2">
+                <div class="text-subtitle-1">Image Layers</div>
+                <v-btn
+                  size="small"
+                  variant="tonal"
+                  color="primary"
+                  prepend-icon="mdi-image-multiple-outline"
+                  @click="triggerImageOverlayInput"
+                >
+                  Add Image
+                </v-btn>
+              </div>
               <div
-                class="image-minimap-viewport"
-                :style="{
-                  left: `${minimapViewport.left}px`,
-                  top: `${minimapViewport.top}px`,
-                  width: `${minimapViewport.width}px`,
-                  height: `${minimapViewport.height}px`
-                }"
-              ></div>
-            </div>
-          </v-sheet>
-          <div class="utility-panel-main">
-            <div class="utility-panel-section-header d-flex align-center justify-space-between mb-2">
-              <div class="text-subtitle-1">Image Layers</div>
-              <v-btn
-                size="small"
-                variant="tonal"
-                color="primary"
-                prepend-icon="mdi-image-multiple-outline"
-                @click="triggerImageOverlayInput"
+                class="image-layer-scroll-region mb-3"
+                @wheel="handleImageLayerRailWheel"
               >
-                Add Image
-              </v-btn>
-            </div>
-            <div class="image-layer-scroll-region mb-3">
-              <div class="chat-layer-list">
-                <v-list density="compact" class="pa-0" bg-color="transparent">
-                  <v-list-item
-                    :active="activeImageOverlayId === null"
-                    rounded="lg"
-                    @click="selectImageOverlay(null)"
-                  >
-                    <template v-slot:prepend>
-                      <v-icon icon="mdi-image-outline" size="small"></v-icon>
-                    </template>
-                    <v-list-item-title>Base Screenshot</v-list-item-title>
-                    <v-list-item-subtitle>
-                      {{ droppedImageSrc ? 'Primary canvas image' : 'No screenshot loaded yet' }}
-                    </v-list-item-subtitle>
-                    <template v-slot:append>
-                      <v-btn
-                        icon="mdi-fit-to-screen-outline"
-                        size="x-small"
-                        variant="text"
-                        :disabled="!droppedImageSrc"
-                        @click.stop="resetImageView"
-                      ></v-btn>
-                    </template>
-                  </v-list-item>
-                  <v-list-item
-                    v-for="overlay in imageOverlays"
-                    :key="overlay.id"
-                    :active="overlay.id === activeImageOverlayId"
-                    class="image-layer-list-item"
-                    rounded="lg"
-                    @click="selectImageOverlay(overlay.id)"
-                  >
-                    <template v-slot:prepend>
-                      <div class="image-layer-thumbnail-wrap">
-                        <img
-                          :src="overlay.src"
-                          :alt="overlay.name"
-                          class="image-layer-thumbnail"
-                        />
-                        <div v-if="overlay.isHidden" class="image-layer-thumbnail-badge">
-                          <v-icon icon="mdi-eye-off-outline" size="x-small"></v-icon>
+                <div class="chat-layer-list">
+                  <v-list density="compact" class="pa-0" bg-color="transparent">
+                    <v-list-item
+                      :active="activeImageOverlayId === null"
+                      rounded="lg"
+                      @click="selectImageOverlay(null)"
+                    >
+                      <template v-slot:prepend>
+                        <v-icon icon="mdi-image-outline" size="small"></v-icon>
+                      </template>
+                      <v-list-item-title>Base Screenshot</v-list-item-title>
+                      <v-list-item-subtitle>
+                        {{ droppedImageSrc ? 'Primary canvas image' : 'No screenshot loaded yet' }}
+                      </v-list-item-subtitle>
+                      <template v-slot:append>
+                        <v-btn
+                          icon="mdi-fit-to-screen-outline"
+                          size="x-small"
+                          variant="text"
+                          :disabled="!droppedImageSrc"
+                          @click.stop="resetImageView"
+                        ></v-btn>
+                      </template>
+                    </v-list-item>
+                    <v-list-item
+                      v-for="overlay in imageOverlays"
+                      :key="overlay.id"
+                      :active="overlay.id === activeImageOverlayId"
+                      class="image-layer-list-item"
+                      rounded="lg"
+                      @click="selectImageOverlay(overlay.id)"
+                    >
+                      <template v-slot:prepend>
+                        <div class="image-layer-thumbnail-wrap">
+                          <img
+                            :src="overlay.src"
+                            :alt="overlay.name"
+                            class="image-layer-thumbnail"
+                          />
+                          <div v-if="overlay.isHidden" class="image-layer-thumbnail-badge">
+                            <v-icon icon="mdi-eye-off-outline" size="x-small"></v-icon>
+                          </div>
+                        </div>
+                      </template>
+                      <div class="image-layer-item-main">
+                        <div class="image-layer-item-name" :title="overlay.name">
+                          {{ overlay.name }}
+                        </div>
+                        <div class="image-layer-item-meta">
+                          Layer {{ imageOverlays.findIndex((item) => item.id === overlay.id) + 1 }} of {{ imageOverlays.length }} · {{ Math.round(overlay.opacity * 100) }}% opacity
+                          <span>{{ overlay.acceptsEffects ? ' • Effects On' : ' • Effects Off' }}</span>
+                          <span v-if="overlay.maskDataUrl"> • Masked</span>
+                          <span v-if="overlay.isHidden"> • Hidden</span>
+                          <span v-if="overlay.isLocked"> • Locked</span>
+                        </div>
+                        <div class="image-layer-item-actions">
+                          <v-tooltip text="Move this layer higher in the stack" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-btn
+                                v-bind="props"
+                                icon="mdi-arrow-down-bold-outline"
+                                size="x-small"
+                                variant="text"
+                                :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === imageOverlays.length - 1"
+                                @click.stop="moveImageOverlay(overlay.id, 'forward')"
+                              ></v-btn>
+                            </template>
+                          </v-tooltip>
+                          <v-tooltip text="Move this layer lower in the stack" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-btn
+                                v-bind="props"
+                                icon="mdi-arrow-up-bold-outline"
+                                size="x-small"
+                                variant="text"
+                                :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === 0"
+                                @click.stop="moveImageOverlay(overlay.id, 'backward')"
+                              ></v-btn>
+                            </template>
+                          </v-tooltip>
+                          <v-tooltip :text="overlay.acceptsEffects ? 'Effects are enabled for this layer' : 'Effects are disabled for this layer'" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-btn
+                                v-bind="props"
+                                :icon="overlay.acceptsEffects ? 'mdi-image-filter-center-focus' : 'mdi-image-filter-center-focus-weak'"
+                                size="x-small"
+                                variant="text"
+                                :color="overlay.acceptsEffects ? 'primary' : undefined"
+                                @click.stop="toggleImageOverlayEffects(overlay.id)"
+                              ></v-btn>
+                            </template>
+                          </v-tooltip>
+                          <v-tooltip :text="overlay.isHidden ? 'Show this layer' : 'Hide this layer'" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-btn
+                                v-bind="props"
+                                :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
+                                size="x-small"
+                                variant="text"
+                                @click.stop="toggleImageOverlayVisibility(overlay.id)"
+                              ></v-btn>
+                            </template>
+                          </v-tooltip>
+                          <v-tooltip :text="overlay.isLocked ? 'Unlock this layer for editing' : 'Lock this layer to prevent editing'" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-btn
+                                v-bind="props"
+                                :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
+                                size="x-small"
+                                variant="text"
+                                @click.stop="toggleImageOverlayLock(overlay.id)"
+                              ></v-btn>
+                            </template>
+                          </v-tooltip>
+                          <v-tooltip text="Duplicate this layer" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-btn
+                                v-bind="props"
+                                icon="mdi-content-copy"
+                                size="x-small"
+                                variant="text"
+                                @click.stop="duplicateImageOverlay(overlay.id)"
+                              ></v-btn>
+                            </template>
+                          </v-tooltip>
+                          <v-tooltip text="Delete this layer" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-btn
+                                v-bind="props"
+                                icon="mdi-delete-outline"
+                                size="x-small"
+                                variant="text"
+                                color="error"
+                                @click.stop="removeImageOverlay(overlay.id)"
+                              ></v-btn>
+                            </template>
+                          </v-tooltip>
                         </div>
                       </div>
-                    </template>
-                    <div class="image-layer-item-main">
-                      <div class="image-layer-item-name" :title="overlay.name">
-                        {{ overlay.name }}
-                      </div>
-                      <div class="image-layer-item-meta">
-                        Layer {{ imageOverlays.findIndex((item) => item.id === overlay.id) + 1 }} of {{ imageOverlays.length }} · {{ Math.round(overlay.opacity * 100) }}% opacity
-                        <span>{{ overlay.acceptsEffects ? ' • Effects On' : ' • Effects Off' }}</span>
-                        <span v-if="overlay.isHidden"> • Hidden</span>
-                        <span v-if="overlay.isLocked"> • Locked</span>
-                      </div>
-                      <div class="image-layer-item-actions">
-                        <v-tooltip text="Move this layer higher in the stack" location="top">
-                          <template v-slot:activator="{ props }">
-                            <v-btn
-                              v-bind="props"
-                              icon="mdi-arrow-down-bold-outline"
-                              size="x-small"
-                              variant="text"
-                              :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === imageOverlays.length - 1"
-                              @click.stop="moveImageOverlay(overlay.id, 'forward')"
-                            ></v-btn>
-                          </template>
-                        </v-tooltip>
-                        <v-tooltip text="Move this layer lower in the stack" location="top">
-                          <template v-slot:activator="{ props }">
-                            <v-btn
-                              v-bind="props"
-                              icon="mdi-arrow-up-bold-outline"
-                              size="x-small"
-                              variant="text"
-                              :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === 0"
-                              @click.stop="moveImageOverlay(overlay.id, 'backward')"
-                            ></v-btn>
-                          </template>
-                        </v-tooltip>
-                        <v-tooltip :text="overlay.acceptsEffects ? 'Effects are enabled for this layer' : 'Effects are disabled for this layer'" location="top">
-                          <template v-slot:activator="{ props }">
-                            <v-btn
-                              v-bind="props"
-                              :icon="overlay.acceptsEffects ? 'mdi-image-filter-center-focus' : 'mdi-image-filter-center-focus-weak'"
-                              size="x-small"
-                              variant="text"
-                              :color="overlay.acceptsEffects ? 'primary' : undefined"
-                              @click.stop="toggleImageOverlayEffects(overlay.id)"
-                            ></v-btn>
-                          </template>
-                        </v-tooltip>
-                        <v-tooltip :text="overlay.isHidden ? 'Show this layer' : 'Hide this layer'" location="top">
-                          <template v-slot:activator="{ props }">
-                            <v-btn
-                              v-bind="props"
-                              :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
-                              size="x-small"
-                              variant="text"
-                              @click.stop="toggleImageOverlayVisibility(overlay.id)"
-                            ></v-btn>
-                          </template>
-                        </v-tooltip>
-                        <v-tooltip :text="overlay.isLocked ? 'Unlock this layer for editing' : 'Lock this layer to prevent editing'" location="top">
-                          <template v-slot:activator="{ props }">
-                            <v-btn
-                              v-bind="props"
-                              :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
-                              size="x-small"
-                              variant="text"
-                              @click.stop="toggleImageOverlayLock(overlay.id)"
-                            ></v-btn>
-                          </template>
-                        </v-tooltip>
-                        <v-tooltip text="Duplicate this layer" location="top">
-                          <template v-slot:activator="{ props }">
-                            <v-btn
-                              v-bind="props"
-                              icon="mdi-content-copy"
-                              size="x-small"
-                              variant="text"
-                              @click.stop="duplicateImageOverlay(overlay.id)"
-                            ></v-btn>
-                          </template>
-                        </v-tooltip>
-                        <v-tooltip text="Delete this layer" location="top">
-                          <template v-slot:activator="{ props }">
-                            <v-btn
-                              v-bind="props"
-                              icon="mdi-delete-outline"
-                              size="x-small"
-                              variant="text"
-                              color="error"
-                              @click.stop="removeImageOverlay(overlay.id)"
-                            ></v-btn>
-                          </template>
-                        </v-tooltip>
-                      </div>
-                    </div>
-                  </v-list-item>
-                </v-list>
-                <div v-if="imageOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
-                  Add PNG, JPG, WEBP, or any browser-supported image to stack props, decals, or cutouts over the screenshot.
+                    </v-list-item>
+                  </v-list>
+                  <div v-if="imageOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
+                    Add PNG, JPG, WEBP, or any browser-supported image to stack props, decals, or cutouts over the screenshot.
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-          <v-sheet
-            v-if="activeImageOverlay"
-            class="censored-region-panel image-layer-detail-panel"
-            border
-            rounded="lg"
-          >
-            <div class="d-flex align-center justify-space-between mb-2">
-              <div>
+            <v-sheet
+              v-if="activeImageOverlay"
+              class="censored-region-panel image-layer-detail-panel"
+              border
+              rounded="lg"
+            >
+            <div class="image-layer-detail-header mb-2">
+              <div class="image-layer-detail-header-copy">
                 <div class="text-subtitle-2">Selected Image Layer</div>
                 <div class="text-caption text-medium-emphasis">
                   Drag, resize with the mouse wheel, or use arrows and +/- while Image Drag is enabled.
@@ -6369,7 +7454,81 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                 Reset Layer
               </v-btn>
             </div>
-          </v-sheet>
+            <div class="text-caption text-medium-emphasis image-mask-mode-copy mb-2">
+              Move keeps drag and zoom active. Erase and Restore paint a non-destructive layer mask.
+            </div>
+            <v-btn-toggle
+              :model-value="imageOverlayTool"
+              color="primary"
+              density="compact"
+              divided
+              mandatory
+              class="image-mask-tool-toggle mb-3"
+              @update:model-value="setImageOverlayTool(($event as ImageOverlayTool) || 'move')"
+            >
+              <v-btn value="move" size="small" prepend-icon="mdi-cursor-move" class="image-mask-tool-button">
+                Move
+              </v-btn>
+              <v-btn value="erase" size="small" prepend-icon="mdi-eraser-variant" class="image-mask-tool-button">
+                Erase
+              </v-btn>
+              <v-btn value="restore" size="small" prepend-icon="mdi-brush" class="image-mask-tool-button">
+                Restore
+              </v-btn>
+            </v-btn-toggle>
+            <div class="text-caption text-medium-emphasis mb-1">Brush Size</div>
+            <v-slider
+              v-model="imageMaskBrushSize"
+              min="8"
+              max="640"
+              step="1"
+              hide-details
+              color="primary"
+            ></v-slider>
+            <div class="image-mask-value-row text-caption mb-1">
+              <span>{{ imageMaskBrushSize }} px</span>
+            </div>
+            <div class="text-caption text-medium-emphasis image-mask-helper-copy mb-2">
+              Mouse wheel over the selected layer adjusts brush size.
+            </div>
+            <div class="text-caption text-medium-emphasis mb-1">Softness</div>
+            <v-slider
+              v-model="imageMaskBrushSoftness"
+              min="0"
+              max="1"
+              step="0.01"
+              hide-details
+              color="primary"
+            ></v-slider>
+            <div class="image-mask-value-row text-caption mb-1">
+              <span>{{ Math.round(imageMaskBrushSoftness * 100) }}%</span>
+            </div>
+            <div class="text-caption text-medium-emphasis image-mask-helper-copy mb-2">
+              Softer edges create a smoother blend into the layer below.
+            </div>
+            <div class="text-caption text-medium-emphasis mb-1">Strength</div>
+            <v-slider
+              v-model="imageMaskBrushStrength"
+              min="0.05"
+              max="1"
+              step="0.01"
+              hide-details
+              color="primary"
+            ></v-slider>
+            <div class="image-mask-action-row text-caption">
+              <span>{{ Math.round(imageMaskBrushStrength * 100) }}%</span>
+              <v-btn
+                size="x-small"
+                variant="text"
+                prepend-icon="mdi-layers-remove-outline"
+                :disabled="!activeImageOverlayHasMask"
+                @click="resetActiveImageOverlayMask"
+              >
+                Clear Mask
+              </v-btn>
+            </div>
+            </v-sheet>
+          </div>
         </v-sheet>
       </div>
 
@@ -6432,21 +7591,20 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               @pointerdown="handleImageMouseDown"
               @dblclick="enableImageDragFromCanvas"
             />
-            <img
+            <canvas
               v-for="overlay in effectAwareImageOverlays.affected"
               v-show="droppedImageSrc"
               :ref="(element) => setImageOverlayElement(overlay.id, element)"
               :key="overlay.id"
-              :src="overlay.src"
-              :alt="overlay.name"
               class="dropped-image image-overlay-layer"
               :style="getImageOverlayStyles(overlay) as CSSProperties"
-              draggable="false"
               @dragstart="preventNativePreviewDrag"
               @pointerdown.stop="handleImageOverlayMouseDown($event, overlay.id)"
+              @pointermove.stop="handleImageOverlayPointerMove($event, overlay.id)"
+              @pointerleave="handleImageOverlayPointerLeave(overlay.id)"
               @dblclick.stop.prevent="enableImageOverlayDragFromCanvas($event, overlay.id)"
               @wheel="handleImageOverlayWheel($event, overlay.id)"
-            />
+            ></canvas>
             <div
               v-for="preview in activeImageEffectPreviews"
               v-show="droppedImageSrc"
@@ -6456,20 +7614,33 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               @dragstart="preventNativePreviewDrag"
             ></div>
             <img
+              v-if="shouldShowSceneImageEffectPreview && sceneImageEffectPreviewDataUrl"
+              :src="sceneImageEffectPreviewDataUrl"
+              alt="Scene effect preview"
+              class="scene-effect-preview-layer"
+              :style="sceneImageEffectPreviewStyle as CSSProperties"
+              draggable="false"
+              @dragstart="preventNativePreviewDrag"
+            />
+            <canvas
               v-for="overlay in effectAwareImageOverlays.unaffected"
               v-show="droppedImageSrc"
               :ref="(element) => setImageOverlayElement(overlay.id, element)"
               :key="overlay.id"
-              :src="overlay.src"
-              :alt="overlay.name"
               class="dropped-image image-overlay-layer"
               :style="getImageOverlayStyles(overlay) as CSSProperties"
-              draggable="false"
               @dragstart="preventNativePreviewDrag"
               @pointerdown.stop="handleImageOverlayMouseDown($event, overlay.id)"
+              @pointermove.stop="handleImageOverlayPointerMove($event, overlay.id)"
+              @pointerleave="handleImageOverlayPointerLeave(overlay.id)"
               @dblclick.stop.prevent="enableImageOverlayDragFromCanvas($event, overlay.id)"
               @wheel="handleImageOverlayWheel($event, overlay.id)"
-            />
+            ></canvas>
+            <div
+              v-if="imageMaskBrushPreview.visible && isImageOverlayBrushActive"
+              class="image-mask-brush-preview"
+              :style="imageMaskBrushPreviewStyle as CSSProperties"
+            ></div>
             <!-- Display Placeholder -->
             <div v-if="!droppedImageSrc" class="text-center">
               <v-icon size="x-large" color="grey-darken-1">mdi-paperclip</v-icon>
@@ -6820,6 +7991,65 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   object-fit: initial;
 }
 
+.image-mask-tool-toggle {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+}
+
+.image-mask-tool-button {
+  min-width: 0;
+  letter-spacing: 0.02em;
+}
+
+.image-mask-tool-toggle :deep(.v-btn) {
+  min-width: 0;
+  padding-inline: 10px;
+}
+
+.image-mask-tool-toggle :deep(.v-btn__content) {
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.image-mask-mode-copy {
+  line-height: 1.45;
+}
+
+.image-mask-value-row,
+.image-mask-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.image-mask-value-row {
+  min-height: 20px;
+}
+
+.image-mask-helper-copy {
+  line-height: 1.35;
+}
+
+.image-mask-brush-preview {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.58),
+    0 0 0 9999px rgba(255, 255, 255, 0);
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.04) 48%, rgba(255, 255, 255, 0) 72%);
+  pointer-events: none;
+  z-index: 260;
+  backdrop-filter: invert(1);
+}
+
 .image-layer-thumbnail-wrap {
   position: relative;
   width: 32px;
@@ -6906,19 +8136,27 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 }
 
 .utility-panel-main {
-  display: flex;
-  flex: 1 1 auto;
+  display: block;
   min-height: 0;
-  flex-direction: column;
 }
 
 .utility-panel-section-header {
   flex-shrink: 0;
 }
 
-.image-layer-scroll-region {
+.utility-panel-scroll {
   flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  margin-right: -4px;
+  overscroll-behavior: contain;
+}
+
+.image-layer-scroll-region {
+  min-height: 0;
+  max-height: 220px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
@@ -6934,21 +8172,33 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 }
 
 .image-layer-detail-panel {
-  flex-shrink: 0;
   margin-top: 12px;
 }
 
+.image-layer-detail-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.image-layer-detail-header-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .selected-image-layer-name {
-  max-width: 128px;
+  max-width: 100%;
   padding: 4px 8px;
   border-radius: 999px;
   background: rgba(var(--v-theme-primary), 0.14);
   color: #f3f4f6;
   font-size: 0.78rem;
   line-height: 1.2;
-  text-align: right;
+  text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
+  align-self: flex-start;
 }
 
 .image-minimap {
@@ -6997,6 +8247,12 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 .image-effect-layer {
   border-radius: inherit;
   z-index: 1;
+  -webkit-user-drag: none;
+}
+
+.scene-effect-preview-layer {
+  border-radius: inherit;
+  display: block;
   -webkit-user-drag: none;
 }
 
@@ -7257,6 +8513,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   height: 100%;
   padding: 4px;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .main-content {
@@ -7281,6 +8538,10 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   color: #f3f4f6 !important;
   min-height: 0;
   overflow: hidden;
+}
+
+.utility-panel-sheet {
+  min-width: 0;
 }
 
 .utility-panel-sheet :deep(.text-medium-emphasis),

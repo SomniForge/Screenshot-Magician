@@ -7,11 +7,38 @@ defineOptions({
 });
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.27-beta';
+const version = 'v2.0.28-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.28-beta',
+        date: 'APR-21-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added non-destructive image-layer masking with Move, Erase, and Restore tools plus adjustable brush size, softness, and strength controls',
+                    'Added a new CCTV scene effect with surveillance-style monochrome treatment, scanlines, grain, and an adjustable lens-curve control'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved the left utility rail layout and scrolling so image-layer controls fit more cleanly and remain usable with larger projects',
+                    'Improved live editing responsiveness for scene effects so dragging stays smooth while CCTV is enabled and refreshes swap in more cleanly'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed image-layer editing behind chat overlays so selected image layers can still be moved or brushed even when chats overlap them',
+                    'Fixed CCTV preview and compositing issues that were hiding lens distortion, causing stale-frame bounce after drag release, or making the live preview disagree with export'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.27-beta',
         date: 'APR-21-2026',
