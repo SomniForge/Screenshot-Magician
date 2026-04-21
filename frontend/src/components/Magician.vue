@@ -1,7 +1,7 @@
 // src/components/Magician.vue
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { ref, computed, reactive, shallowRef, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { type CSSProperties } from 'vue';
 import { useDisplay, useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
@@ -52,6 +52,7 @@ interface ImageOverlay {
   src: string;
   transform: ChatTransform;
   opacity: number;
+  acceptsEffects: boolean;
   isHidden: boolean;
   isLocked: boolean;
 }
@@ -169,6 +170,7 @@ interface ImageEffectPreset {
   blendMode: GlobalCompositeOperation;
   defaultOpacity: number;
   supportsSeed: boolean;
+  supportsOpacity?: boolean;
 }
 
 interface TutorialStep {
@@ -220,6 +222,37 @@ interface EditorHistoryEntry {
   currentProjectName: string;
 }
 
+interface ImageEffectPreviewEntry {
+  effect: ImageEffectLayer;
+  preset: ImageEffectPreset;
+  dataUrl: string;
+}
+
+interface GuideBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  centerX: number;
+  centerY: number;
+  width: number;
+  height: number;
+}
+
+interface SmartGuideLine {
+  kind: 'alignment' | 'spacing';
+  orientation: 'vertical' | 'horizontal';
+  position: number;
+  start: number;
+  end: number;
+}
+
+interface SmartGuideLabel {
+  text: string;
+  x: number;
+  y: number;
+}
+
 const DEFAULT_CHAT_LINE_WIDTH = 640;
 const HISTORY_LIMIT = 50;
 const HISTORY_COMMIT_DELAY_MS = 250;
@@ -238,6 +271,8 @@ const CUSTOM_THEMES_STORAGE_KEY = 'magicianCustomThemes';
 const ACTIVE_THEME_STORAGE_KEY = 'magicianActiveTheme';
 const EDITOR_STATE_STORAGE_KEY = 'magicianEditorState';
 const SHOW_NAVIGATOR_STORAGE_KEY = 'magicianShowNavigator';
+const SMART_GUIDES_ENABLED_STORAGE_KEY = 'magicianSmartGuidesEnabled';
+const SMART_GUIDE_STRENGTH_STORAGE_KEY = 'magicianSmartGuideStrength';
 
 const chatOverlays = ref<ChatOverlay[]>([]);
 const activeChatOverlayId = ref<string | null>(null);
@@ -267,6 +302,8 @@ const showSettingsDialog = ref(false);
 const showKeyboardShortcutsDialog = ref(false);
 const showTutorialDialog = ref(false);
 const showNavigator = ref(true);
+const smartGuidesEnabled = ref(true);
+const smartGuideStrength = ref(6);
 const pendingProjectName = ref('');
 const pendingProjectDelete = ref<{ id: string; name: string } | null>(null);
 const isProjectsLoading = ref(false);
@@ -295,6 +332,9 @@ const { trackEvent } = useAnalytics();
 const isApplyingHistoryState = ref(false);
 let historyCommitTimer: ReturnType<typeof setTimeout> | null = null;
 let projectAutosaveTimer: ReturnType<typeof setTimeout> | null = null;
+let editorStatePersistTimer: ReturnType<typeof setTimeout> | null = null;
+let dropzoneScaleAnimationFrame: number | null = null;
+let windowResizeHandler: (() => void) | null = null;
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
@@ -303,15 +343,25 @@ const isPanning = ref(false);
 const panStart = reactive({ x: 0, y: 0 });
 const panStartImagePos = reactive({ x: 0, y: 0 });
 const activeImageDragTarget = ref<'base' | 'overlay'>('base');
+const imageOverlayElementMap = new Map<string, HTMLElement>();
+const pendingImageDragPosition = reactive({ x: 0, y: 0 });
+let imageDragAnimationFrame: number | null = null;
 
 // --- Chat Manipulation State ---
 const isChatDraggingEnabled = ref(false);
 const isChatPanning = ref(false);
 const chatPanStart = reactive({ x: 0, y: 0 });
 const chatPanStartPos = reactive({ x: 0, y: 0 });
+const chatOverlayElementMap = new Map<string, HTMLElement>();
+const pendingChatDragPosition = reactive({ x: 0, y: 0 });
+let chatDragAnimationFrame: number | null = null;
+const smartGuideLines = ref<SmartGuideLine[]>([]);
+const smartGuideLabels = ref<SmartGuideLabel[]>([]);
+let activeCanvasDragCleanup: (() => void) | null = null;
 
 // --- Scale Adjustment for Drop Zone Visibility ---
 const contentAreaRef = ref<HTMLElement | null>(null); // Reference to content area div
+const dropZoneRef = ref<HTMLElement | null>(null);
 const dropzoneScale = ref(1); // Scale factor for the dropzone to fit screen
 const isScaledDown = ref(false); // Flag to track if the dropzone is scaled down
 const minimapRef = ref<HTMLElement | null>(null);
@@ -365,7 +415,6 @@ const calculateDropzoneScale = () => {
       // We can use more space while keeping aspect ratio
       dropzoneScale.value = optimalScale;
       isScaledDown.value = true;
-      console.log(`Optimized scaling: ${optimalScale.toFixed(2)}x to better use available space`);
       return;
     }
   }
@@ -374,14 +423,26 @@ const calculateDropzoneScale = () => {
   if (Math.abs(newScale - dropzoneScale.value) > 0.01) {
     dropzoneScale.value = newScale;
     isScaledDown.value = newScale < 0.98; // Consider it scaled down if below 98% of original size
-    console.log(`Rescaled dropzone: ${newScale.toFixed(2)}x (${isScaledDown.value ? 'scaled down' : 'actual size'})`);
   }
+};
+
+const scheduleDropzoneScaleCalculation = () => {
+  if (typeof window === 'undefined') return;
+
+  if (dropzoneScaleAnimationFrame !== null) {
+    window.cancelAnimationFrame(dropzoneScaleAnimationFrame);
+  }
+
+  dropzoneScaleAnimationFrame = window.requestAnimationFrame(() => {
+    dropzoneScaleAnimationFrame = null;
+    calculateDropzoneScale();
+  });
 };
 
 // Add watchers to recalculate scale when dimensions change
 watch([dropZoneWidth, dropZoneHeight, chatPanelFlexBasis], () => {
   // Recalculate scale whenever dropzone dimensions or chat panel width changes
-  setTimeout(() => calculateDropzoneScale(), 0);
+  scheduleDropzoneScaleCalculation();
 }, { immediate: true });
 
 // Add a scale indicator to show when the content is scaled down
@@ -463,6 +524,13 @@ const shortcutGroups: ShortcutGroup[] = [
       { label: 'Zoom active chat layer', keys: ['+', '/ -'] },
       { label: 'Clear selected censor or color formatting', keys: ['Delete'] }
     ]
+  },
+  {
+    title: 'Guides',
+    items: [
+      { label: 'Snap to canvas and layer alignment guides', keys: ['Drag'] },
+      { label: 'Show equal spacing guides between nearby objects', keys: ['Drag'] }
+    ]
   }
 ];
 
@@ -491,6 +559,23 @@ const IMAGE_EFFECT_PRESETS: ImageEffectPreset[] = [
     description: 'Adds fine monochrome grain for a gritty, cinematic finish.',
     blendMode: 'overlay',
     defaultOpacity: 0.32,
+    supportsSeed: true
+  },
+  {
+    id: 'inverse',
+    name: 'Inverse',
+    description: 'Inverts the screenshot colors so dark tones become light and vice versa.',
+    blendMode: 'difference',
+    defaultOpacity: 1,
+    supportsSeed: false,
+    supportsOpacity: false
+  },
+  {
+    id: 'darken',
+    name: 'Darken',
+    description: 'Pushes a smoky dark wash over the frame without crushing every highlight.',
+    blendMode: 'darken',
+    defaultOpacity: 0.42,
     supportsSeed: true
   },
   {
@@ -708,17 +793,23 @@ const aspectRatioContainerStyle = computed(() => {
   };
 });
 
-const imageStyle = computed(() => ({
-  maxWidth: 'none', // Allow image to be larger than container for zoom
-  maxHeight: 'none',
-  position: 'absolute', // Position relative to the drop zone sheet
-  top: '0', // Start at top-left before transform
-  left: '0',
-  transformOrigin: 'center center', // Zoom from the center
-  transform: `translate(${imageTransform.x}px, ${imageTransform.y}px) scale(${imageTransform.scale})`,
-  cursor: isImageDraggingEnabled.value ? (isPanning.value ? 'grabbing' : 'grab') : 'default',
-  transition: isPanning.value ? 'none' : 'transform 0.1s ease-out' // Smooth transition only when not panning
-}));
+const imageStyle = computed(() => {
+  const liveTransform = activeImageDragTarget.value === 'base' && isPanning.value
+    ? pendingImageDragPosition
+    : imageTransform;
+
+  return {
+    maxWidth: 'none', // Allow image to be larger than container for zoom
+    maxHeight: 'none',
+    position: 'absolute', // Position relative to the drop zone sheet
+    top: '0', // Start at top-left before transform
+    left: '0',
+    transformOrigin: 'center center', // Zoom from the center
+    transform: `translate(${liveTransform.x}px, ${liveTransform.y}px) scale(${imageTransform.scale})`,
+    cursor: isImageDraggingEnabled.value ? (isPanning.value ? 'grabbing' : 'grab') : 'default',
+    transition: isPanning.value ? 'none' : 'transform 0.1s ease-out' // Smooth transition only when not panning
+  };
+});
 
 const imageFitDimensions = computed(() => {
   const zoneWidth = dropZoneWidth.value || 800;
@@ -771,12 +862,15 @@ const minimapViewport = computed(() => {
   const centerX = zoneWidth / 2;
   const centerY = zoneHeight / 2;
   const { width, height, offsetX, offsetY } = imageFitDimensions.value;
+  const liveImageTransform = activeImageDragTarget.value === 'base' && isPanning.value
+    ? pendingImageDragPosition
+    : imageTransform;
   const scale = imageTransform.scale || 1;
 
-  const visibleLeft = ((((0 - imageTransform.x - centerX) / scale) + centerX) - offsetX);
-  const visibleTop = ((((0 - imageTransform.y - centerY) / scale) + centerY) - offsetY);
-  const visibleRight = ((((zoneWidth - imageTransform.x - centerX) / scale) + centerX) - offsetX);
-  const visibleBottom = ((((zoneHeight - imageTransform.y - centerY) / scale) + centerY) - offsetY);
+  const visibleLeft = ((((0 - liveImageTransform.x - centerX) / scale) + centerX) - offsetX);
+  const visibleTop = ((((0 - liveImageTransform.y - centerY) / scale) + centerY) - offsetY);
+  const visibleRight = ((((zoneWidth - liveImageTransform.x - centerX) / scale) + centerX) - offsetX);
+  const visibleBottom = ((((zoneHeight - liveImageTransform.y - centerY) / scale) + centerY) - offsetY);
 
   const clampedLeft = Math.max(0, Math.min(width, visibleLeft));
   const clampedTop = Math.max(0, Math.min(height, visibleTop));
@@ -797,7 +891,12 @@ const minimapViewport = computed(() => {
 const showImageMinimap = computed(() =>
   showNavigator.value
   && Boolean(droppedImageSrc.value)
-  && (imageTransform.scale > 1 || imageTransform.x !== 0 || imageTransform.y !== 0)
+  && (
+    imageTransform.scale > 1
+    || (activeImageDragTarget.value === 'base' && isPanning.value
+      ? pendingImageDragPosition.x !== 0 || pendingImageDragPosition.y !== 0
+      : imageTransform.x !== 0 || imageTransform.y !== 0)
+  )
 );
 
 const createOverlayId = () =>
@@ -860,6 +959,7 @@ const cloneImageOverlay = (overlay: Partial<ImageOverlay>, index: number): Image
     ...(overlay.transform || {})
   },
   opacity: typeof overlay.opacity === 'number' ? clampImageOverlayOpacity(overlay.opacity) : 1,
+  acceptsEffects: overlay.acceptsEffects ?? true,
   isHidden: overlay.isHidden ?? false,
   isLocked: overlay.isLocked ?? false
 });
@@ -969,6 +1069,45 @@ const buildImageEffectCanvas = (effect: ImageEffectLayer, width: number, height:
         imageData.data[i + 3] = alpha;
       }
       ctx.putImageData(imageData, 0, 0);
+      break;
+    }
+    case 'inverse': {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      break;
+    }
+    case 'darken': {
+      const gradient = ctx.createRadialGradient(
+        width / 2,
+        height / 2,
+        Math.min(width, height) * 0.12,
+        width / 2,
+        height / 2,
+        Math.max(width, height) * 0.78
+      );
+      gradient.addColorStop(0, 'rgba(70, 60, 76, 0.18)');
+      gradient.addColorStop(0.58, 'rgba(44, 37, 49, 0.4)');
+      gradient.addColorStop(1, 'rgba(10, 8, 14, 0.88)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      for (let i = 0; i < Math.max(10, Math.floor((width + height) / 90)); i++) {
+        const cloudX = random() * width;
+        const cloudY = random() * height;
+        const cloudRadius = Math.min(width, height) * (0.05 + random() * 0.12);
+        const cloud = ctx.createRadialGradient(
+          cloudX,
+          cloudY,
+          0,
+          cloudX,
+          cloudY,
+          cloudRadius
+        );
+        cloud.addColorStop(0, `rgba(12, 10, 18, ${0.12 + random() * 0.12})`);
+        cloud.addColorStop(1, 'rgba(12, 10, 18, 0)');
+        ctx.fillStyle = cloud;
+        ctx.fillRect(cloudX - cloudRadius, cloudY - cloudRadius, cloudRadius * 2, cloudRadius * 2);
+      }
       break;
     }
     case 'dust-scratches': {
@@ -1114,27 +1253,46 @@ const activeImageEffectLayers = computed(() =>
     .filter((entry): entry is { effect: ImageEffectLayer; preset: ImageEffectPreset } => entry !== null)
 );
 
-const activeImageEffectPreviews = computed(() => {
-  if (!droppedImageSrc.value) return [];
+const imageEffectPreviewCache = new Map<string, string>();
+const activeImageEffectPreviews = shallowRef<ImageEffectPreviewEntry[]>([]);
+
+const refreshImageEffectPreviews = () => {
+  if (!droppedImageSrc.value) {
+    activeImageEffectPreviews.value = [];
+    return;
+  }
 
   const width = dropZoneWidth.value || 800;
   const height = dropZoneHeight.value || 600;
 
-  return activeImageEffectLayers.value
+  activeImageEffectPreviews.value = activeImageEffectLayers.value
     .map(({ effect, preset }) => {
-      const canvas = buildImageEffectCanvas(effect, width, height);
-      if (!canvas) return null;
+      const cacheKey = `${preset.id}:${effect.seed}:${width}x${height}`;
+      let dataUrl = imageEffectPreviewCache.get(cacheKey);
+
+      if (!dataUrl) {
+        const canvas = buildImageEffectCanvas(effect, width, height);
+        if (!canvas) return null;
+
+        dataUrl = canvas.toDataURL('image/png');
+        imageEffectPreviewCache.set(cacheKey, dataUrl);
+      }
 
       return {
         effect,
         preset,
-        dataUrl: canvas.toDataURL('image/png')
+        dataUrl
       };
     })
-    .filter((entry): entry is { effect: ImageEffectLayer; preset: ImageEffectPreset; dataUrl: string } => entry !== null);
+    .filter((entry): entry is ImageEffectPreviewEntry => entry !== null);
+};
+
+watch([droppedImageSrc, imageEffects, dropZoneWidth, dropZoneHeight], refreshImageEffectPreviews, {
+  deep: true,
+  immediate: true
 });
 
-const getImageEffectPreviewStyle = (entry: { effect: ImageEffectLayer; preset: ImageEffectPreset; dataUrl: string }) => ({
+const getImageEffectPreviewStyle = (entry: ImageEffectPreviewEntry) => ({
   position: 'absolute' as const,
   inset: '0',
   pointerEvents: 'none' as const,
@@ -1143,7 +1301,7 @@ const getImageEffectPreviewStyle = (entry: { effect: ImageEffectLayer; preset: I
   backgroundSize: '100% 100%',
   opacity: entry.effect.opacity,
   mixBlendMode: entry.preset.blendMode,
-  zIndex: 1
+  zIndex: 100
 });
 
 const normalizeHexColor = (value: string, fallback: string) => {
@@ -1386,10 +1544,11 @@ const toPortableProjectFile = (project: ProjectRecord): PortableProjectFile => (
   }
 });
 
-const createComparableSnapshot = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => ({
-  ...toSerializableSnapshot(snapshot),
-  selectedText: { ...DEFAULT_SELECTED_TEXT }
-});
+const createComparableSnapshot = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => {
+  const comparableSnapshot = toSerializableSnapshot(snapshot);
+  comparableSnapshot.selectedText = { ...DEFAULT_SELECTED_TEXT };
+  return comparableSnapshot;
+};
 
 const getSnapshotSignature = (snapshot: EditorStateSnapshot = createEditorSnapshot()) =>
   JSON.stringify(createComparableSnapshot(snapshot));
@@ -2265,6 +2424,7 @@ const addImageOverlayFromFile = async (file: File, src: string) => {
     src,
     transform: placement,
     opacity: 1,
+    acceptsEffects: true,
     isHidden: false,
     isLocked: false
   }, overlayIndex);
@@ -2458,6 +2618,424 @@ const handleDragLeave = () => {
   isDraggingOverDropZone.value = false;
 };
 
+const getCanvasInteractionScale = () => {
+  const scale = isScaledDown.value ? dropzoneScale.value : 1;
+  return scale > 0 ? scale : 1;
+};
+
+const clearSmartGuides = () => {
+  smartGuideLines.value = [];
+  smartGuideLabels.value = [];
+};
+
+const beginCapturedCanvasDrag = (
+  event: PointerEvent,
+  moveHandler: (event: PointerEvent) => void,
+  endHandler: (event?: PointerEvent) => void
+) => {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  activeCanvasDragCleanup?.();
+
+  const pointerId = event.pointerId;
+  const cleanup = () => {
+    window.removeEventListener('pointermove', handlePointerMove, true);
+    window.removeEventListener('pointerup', handlePointerEnd, true);
+    window.removeEventListener('pointercancel', handlePointerEnd, true);
+    target.removeEventListener('lostpointercapture', handleLostPointerCapture);
+
+    if (target.hasPointerCapture(pointerId)) {
+      target.releasePointerCapture(pointerId);
+    }
+
+    if (activeCanvasDragCleanup === cleanup) {
+      activeCanvasDragCleanup = null;
+    }
+  };
+
+  const handlePointerMove = (pointerEvent: PointerEvent) => {
+    if (pointerEvent.pointerId !== pointerId) return;
+    moveHandler(pointerEvent);
+  };
+
+  const handlePointerEnd = (pointerEvent: PointerEvent) => {
+    if (pointerEvent.pointerId !== pointerId) return;
+    cleanup();
+    endHandler(pointerEvent);
+  };
+
+  const handleLostPointerCapture = () => {
+    cleanup();
+    endHandler();
+  };
+
+  target.setPointerCapture(pointerId);
+  window.addEventListener('pointermove', handlePointerMove, true);
+  window.addEventListener('pointerup', handlePointerEnd, true);
+  window.addEventListener('pointercancel', handlePointerEnd, true);
+  target.addEventListener('lostpointercapture', handleLostPointerCapture);
+  activeCanvasDragCleanup = cleanup;
+};
+
+const createGuideBounds = (left: number, top: number, width: number, height: number): GuideBounds => ({
+  left,
+  top,
+  right: left + width,
+  bottom: top + height,
+  centerX: left + (width / 2),
+  centerY: top + (height / 2),
+  width,
+  height
+});
+
+const getImageOverlayGuideBounds = (
+  overlay: ImageOverlay,
+  element: HTMLElement,
+  x: number = overlay.transform.x,
+  y: number = overlay.transform.y
+) => {
+  const width = element.offsetWidth * overlay.transform.scale;
+  const height = element.offsetHeight * overlay.transform.scale;
+  return createGuideBounds(x, y, width, height);
+};
+
+const getChatOverlayGuideBounds = (
+  overlay: ChatOverlay,
+  element: HTMLElement,
+  x: number = overlay.transform.x,
+  y: number = overlay.transform.y
+) => {
+  const width = element.offsetWidth * overlay.transform.scale;
+  const height = element.offsetHeight * overlay.transform.scale;
+  return createGuideBounds(x, y, width, height);
+};
+
+const collectSmartGuideBounds = (
+  draggingType: 'chat' | 'image',
+  draggingId: string
+) => {
+  const bounds: GuideBounds[] = [];
+
+  imageOverlays.value.forEach((overlay) => {
+    if (overlay.id === draggingId && draggingType === 'image') return;
+    if (overlay.isHidden) return;
+
+    const element = imageOverlayElementMap.get(overlay.id);
+    if (!element) return;
+
+    bounds.push(getImageOverlayGuideBounds(overlay, element));
+  });
+
+  chatOverlays.value.forEach((overlay) => {
+    if (overlay.id === draggingId && draggingType === 'chat') return;
+    if (overlay.isHidden || overlay.parsedLines.length === 0) return;
+
+    const element = chatOverlayElementMap.get(overlay.id);
+    if (!element) return;
+
+    bounds.push(getChatOverlayGuideBounds(overlay, element));
+  });
+
+  return bounds;
+};
+
+const getBestAxisSnap = (
+  movingPoints: number[],
+  targets: number[]
+) => {
+  let bestDelta = Number.POSITIVE_INFINITY;
+  let bestTarget: number | null = null;
+
+  movingPoints.forEach((point) => {
+    targets.forEach((target) => {
+      const delta = target - point;
+      if (Math.abs(delta) <= smartGuideStrength.value && Math.abs(delta) < Math.abs(bestDelta)) {
+        bestDelta = delta;
+        bestTarget = target;
+      }
+    });
+  });
+
+  if (bestTarget === null || !Number.isFinite(bestDelta)) {
+    return null;
+  }
+
+  return {
+    delta: bestDelta,
+    target: bestTarget
+  };
+};
+
+const rangesOverlap = (startA: number, endA: number, startB: number, endB: number) =>
+  Math.min(endA, endB) - Math.max(startA, startB) > 0;
+
+const getSpacingSnap = (
+  proposedBounds: GuideBounds,
+  stationaryBounds: GuideBounds[],
+  axis: 'horizontal' | 'vertical'
+) => {
+  let bestMatch:
+    | {
+        delta: number;
+        gap: number;
+        before: GuideBounds;
+        after: GuideBounds;
+      }
+    | null = null;
+
+  stationaryBounds.forEach((before) => {
+    stationaryBounds.forEach((after) => {
+      if (before === after) return;
+
+      if (axis === 'horizontal') {
+        if (before.right > proposedBounds.left || after.left < proposedBounds.right) return;
+        if (!rangesOverlap(before.top, before.bottom, proposedBounds.top, proposedBounds.bottom)) return;
+        if (!rangesOverlap(after.top, after.bottom, proposedBounds.top, proposedBounds.bottom)) return;
+
+        const targetX = (before.right + after.left - proposedBounds.width) / 2;
+        const delta = targetX - proposedBounds.left;
+        if (Math.abs(delta) > smartGuideStrength.value) return;
+
+        const gap = targetX - before.right;
+        if (!bestMatch || Math.abs(delta) < Math.abs(bestMatch.delta)) {
+          bestMatch = { delta, gap, before, after };
+        }
+        return;
+      }
+
+      if (before.bottom > proposedBounds.top || after.top < proposedBounds.bottom) return;
+      if (!rangesOverlap(before.left, before.right, proposedBounds.left, proposedBounds.right)) return;
+      if (!rangesOverlap(after.left, after.right, proposedBounds.left, proposedBounds.right)) return;
+
+      const targetY = (before.bottom + after.top - proposedBounds.height) / 2;
+      const delta = targetY - proposedBounds.top;
+      if (Math.abs(delta) > smartGuideStrength.value) return;
+
+      const gap = targetY - before.bottom;
+      if (!bestMatch || Math.abs(delta) < Math.abs(bestMatch.delta)) {
+        bestMatch = { delta, gap, before, after };
+      }
+    });
+  });
+
+  return bestMatch;
+};
+
+const applySmartGuides = (
+  draggingType: 'chat' | 'image',
+  draggingId: string,
+  proposedBounds: GuideBounds,
+  bypassSnapping = false
+) => {
+  if (bypassSnapping || !smartGuidesEnabled.value) {
+    clearSmartGuides();
+    return {
+      x: proposedBounds.left,
+      y: proposedBounds.top
+    };
+  }
+
+  const stationaryBounds = collectSmartGuideBounds(draggingType, draggingId);
+  const verticalTargets = [0, (dropZoneWidth.value || 800) / 2, dropZoneWidth.value || 800];
+  const horizontalTargets = [0, (dropZoneHeight.value || 600) / 2, dropZoneHeight.value || 600];
+
+  stationaryBounds.forEach((bounds) => {
+    verticalTargets.push(bounds.left, bounds.centerX, bounds.right);
+    horizontalTargets.push(bounds.top, bounds.centerY, bounds.bottom);
+  });
+
+  const verticalSnap = getBestAxisSnap(
+    [proposedBounds.left, proposedBounds.centerX, proposedBounds.right],
+    verticalTargets
+  );
+  const horizontalSnap = getBestAxisSnap(
+    [proposedBounds.top, proposedBounds.centerY, proposedBounds.bottom],
+    horizontalTargets
+  );
+  const horizontalSpacingSnap = getSpacingSnap(proposedBounds, stationaryBounds, 'horizontal');
+  const verticalSpacingSnap = getSpacingSnap(proposedBounds, stationaryBounds, 'vertical');
+
+  const resolvedX = proposedBounds.left
+    + (horizontalSpacingSnap?.delta ?? verticalSnap?.delta ?? 0);
+  const resolvedY = proposedBounds.top
+    + (verticalSpacingSnap?.delta ?? horizontalSnap?.delta ?? 0);
+
+  const nextLines: SmartGuideLine[] = [];
+  const nextLabels: SmartGuideLabel[] = [];
+  if (verticalSnap) {
+    nextLines.push({
+      kind: 'alignment',
+      orientation: 'vertical',
+      position: verticalSnap.target,
+      start: 0,
+      end: dropZoneHeight.value || 600
+    });
+  }
+  if (horizontalSnap) {
+    nextLines.push({
+      kind: 'alignment',
+      orientation: 'horizontal',
+      position: horizontalSnap.target,
+      start: 0,
+      end: dropZoneWidth.value || 800
+    });
+  }
+  if (horizontalSpacingSnap) {
+    const spacingY = proposedBounds.centerY + (verticalSpacingSnap?.delta ?? 0);
+    const leftX = horizontalSpacingSnap.before.right;
+    const snappedLeft = resolvedX;
+    const snappedRight = resolvedX + proposedBounds.width;
+    const rightX = horizontalSpacingSnap.after.left;
+
+    nextLines.push({
+      kind: 'spacing',
+      orientation: 'horizontal',
+      position: spacingY,
+      start: leftX,
+      end: snappedLeft
+    });
+    nextLines.push({
+      kind: 'spacing',
+      orientation: 'horizontal',
+      position: spacingY,
+      start: snappedRight,
+      end: rightX
+    });
+    nextLabels.push({
+      text: `${Math.round(horizontalSpacingSnap.gap)} px`,
+      x: (leftX + snappedLeft) / 2,
+      y: spacingY - 12
+    });
+    nextLabels.push({
+      text: `${Math.round(horizontalSpacingSnap.gap)} px`,
+      x: (snappedRight + rightX) / 2,
+      y: spacingY - 12
+    });
+  }
+  if (verticalSpacingSnap) {
+    const spacingX = proposedBounds.centerX + (horizontalSpacingSnap?.delta ?? verticalSnap?.delta ?? 0);
+    const topY = verticalSpacingSnap.before.bottom;
+    const snappedTop = resolvedY;
+    const snappedBottom = resolvedY + proposedBounds.height;
+    const bottomY = verticalSpacingSnap.after.top;
+
+    nextLines.push({
+      kind: 'spacing',
+      orientation: 'vertical',
+      position: spacingX,
+      start: topY,
+      end: snappedTop
+    });
+    nextLines.push({
+      kind: 'spacing',
+      orientation: 'vertical',
+      position: spacingX,
+      start: snappedBottom,
+      end: bottomY
+    });
+    nextLabels.push({
+      text: `${Math.round(verticalSpacingSnap.gap)} px`,
+      x: spacingX + 10,
+      y: (topY + snappedTop) / 2
+    });
+    nextLabels.push({
+      text: `${Math.round(verticalSpacingSnap.gap)} px`,
+      x: spacingX + 10,
+      y: (snappedBottom + bottomY) / 2
+    });
+  }
+  smartGuideLines.value = nextLines;
+  smartGuideLabels.value = nextLabels;
+
+  return {
+    x: resolvedX,
+    y: resolvedY
+  };
+};
+
+const setImageOverlayElement = (overlayId: string, element: Element | null) => {
+  if (element instanceof HTMLElement) {
+    imageOverlayElementMap.set(overlayId, element);
+    return;
+  }
+
+  imageOverlayElementMap.delete(overlayId);
+};
+
+const setChatOverlayElement = (overlayId: string, element: Element | null) => {
+  if (element instanceof HTMLElement) {
+    chatOverlayElementMap.set(overlayId, element);
+    return;
+  }
+
+  chatOverlayElementMap.delete(overlayId);
+};
+
+const buildImageTransform = (x: number, y: number, scale: number) =>
+  `translate(${x}px, ${y}px) scale(${scale})`;
+
+const applyImmediateImageDragPosition = () => {
+  if (activeImageDragTarget.value === 'overlay' && activeImageOverlayId.value) {
+    const element = imageOverlayElementMap.get(activeImageOverlayId.value);
+    const overlay = activeImageOverlay.value;
+    if (element && overlay) {
+      element.style.transform = buildImageTransform(
+        pendingImageDragPosition.x,
+        pendingImageDragPosition.y,
+        overlay.transform.scale
+      );
+    }
+    return;
+  }
+
+  if (imageElementRef.value) {
+    imageElementRef.value.style.transform = buildImageTransform(
+      pendingImageDragPosition.x,
+      pendingImageDragPosition.y,
+      imageTransform.scale
+    );
+  }
+};
+
+const scheduleImmediateImageDragPosition = () => {
+  if (typeof window === 'undefined') return;
+  if (imageDragAnimationFrame !== null) return;
+
+  imageDragAnimationFrame = window.requestAnimationFrame(() => {
+    imageDragAnimationFrame = null;
+    applyImmediateImageDragPosition();
+  });
+};
+
+const buildChatTransform = (x: number, y: number, scale: number) =>
+  `translate(${x}px, ${y}px) scale(${scale})`;
+
+const applyImmediateChatDragPosition = () => {
+  if (!activeChatOverlayId.value || !activeChatOverlay.value) return;
+
+  const element = chatOverlayElementMap.get(activeChatOverlayId.value);
+  if (!element) return;
+
+  element.style.transform = buildChatTransform(
+    pendingChatDragPosition.x,
+    pendingChatDragPosition.y,
+    activeChatOverlay.value.transform.scale
+  );
+};
+
+const scheduleImmediateChatDragPosition = () => {
+  if (typeof window === 'undefined') return;
+  if (chatDragAnimationFrame !== null) return;
+
+  chatDragAnimationFrame = window.requestAnimationFrame(() => {
+    chatDragAnimationFrame = null;
+    applyImmediateChatDragPosition();
+  });
+};
+
 const handleDrop = (event: DragEvent) => {
   event.preventDefault();
   isDraggingOverDropZone.value = false;
@@ -2490,7 +3068,7 @@ const handleDrop = (event: DragEvent) => {
 };
 
 // --- Image Panning Handlers ---
-const handleImageMouseDown = (event: MouseEvent) => {
+const handleImageMouseDown = (event: PointerEvent) => {
   if (!isImageDraggingEnabled.value || !droppedImageSrc.value) return;
   if (activeImageOverlayId.value !== null) return;
   selectImageOverlay(null);
@@ -2500,35 +3078,69 @@ const handleImageMouseDown = (event: MouseEvent) => {
   panStart.y = event.clientY;
   panStartImagePos.x = imageTransform.x;
   panStartImagePos.y = imageTransform.y;
-  // Add a class to body to prevent text selection during drag
+  pendingImageDragPosition.x = imageTransform.x;
+  pendingImageDragPosition.y = imageTransform.y;
   document.body.style.userSelect = 'none';
-  document.addEventListener('mousemove', handleImageMouseMove);
-  document.addEventListener('mouseup', handleImageMouseUpOrLeave);
+  beginCapturedCanvasDrag(event, handleImageMouseMove, handleImageMouseUpOrLeave);
 };
 
-const handleImageMouseMove = (event: MouseEvent) => {
+const handleImageMouseMove = (event: PointerEvent) => {
   if (!isPanning.value) return;
-  const deltaX = event.clientX - panStart.x;
-  const deltaY = event.clientY - panStart.y;
+  const interactionScale = getCanvasInteractionScale();
+  const deltaX = (event.clientX - panStart.x) / interactionScale;
+  const deltaY = (event.clientY - panStart.y) / interactionScale;
 
   if (activeImageDragTarget.value === 'overlay' && activeImageOverlay.value) {
-    activeImageOverlay.value.transform.x = panStartImagePos.x + deltaX;
-    activeImageOverlay.value.transform.y = panStartImagePos.y + deltaY;
+    const element = imageOverlayElementMap.get(activeImageOverlay.value.id);
+    const proposedX = panStartImagePos.x + deltaX;
+    const proposedY = panStartImagePos.y + deltaY;
+
+    if (element) {
+      const snappedPosition = applySmartGuides(
+        'image',
+        activeImageOverlay.value.id,
+        getImageOverlayGuideBounds(activeImageOverlay.value, element, proposedX, proposedY),
+        false
+      );
+      pendingImageDragPosition.x = snappedPosition.x;
+      pendingImageDragPosition.y = snappedPosition.y;
+    } else {
+      clearSmartGuides();
+      pendingImageDragPosition.x = proposedX;
+      pendingImageDragPosition.y = proposedY;
+    }
+
+    scheduleImmediateImageDragPosition();
     return;
   }
 
-  imageTransform.x = panStartImagePos.x + deltaX;
-  imageTransform.y = panStartImagePos.y + deltaY;
+  clearSmartGuides();
+  pendingImageDragPosition.x = panStartImagePos.x + deltaX;
+  pendingImageDragPosition.y = panStartImagePos.y + deltaY;
+  scheduleImmediateImageDragPosition();
 };
 
 const handleImageMouseUpOrLeave = () => {
   if (isPanning.value) {
+    if (activeImageDragTarget.value === 'overlay' && activeImageOverlay.value) {
+      activeImageOverlay.value.transform.x = pendingImageDragPosition.x;
+      activeImageOverlay.value.transform.y = pendingImageDragPosition.y;
+    } else {
+      imageTransform.x = pendingImageDragPosition.x;
+      imageTransform.y = pendingImageDragPosition.y;
+    }
+
     isPanning.value = false;
     document.body.style.userSelect = ''; // Re-enable text selection
   }
 
-  document.removeEventListener('mousemove', handleImageMouseMove);
-  document.removeEventListener('mouseup', handleImageMouseUpOrLeave);
+  clearSmartGuides();
+
+  if (imageDragAnimationFrame !== null) {
+    window.cancelAnimationFrame(imageDragAnimationFrame);
+    imageDragAnimationFrame = null;
+  }
+
 };
 
 // --- Image Zoom Handler ---
@@ -2574,7 +3186,7 @@ const enableImageDragFromCanvas = (event: MouseEvent) => {
   isChatDraggingEnabled.value = false;
 };
 
-const handleImageOverlayMouseDown = (event: MouseEvent, overlayId: string) => {
+const handleImageOverlayMouseDown = (event: PointerEvent, overlayId: string) => {
   const overlay = imageOverlays.value.find((item) => item.id === overlayId);
   if (!overlay) return;
 
@@ -2591,9 +3203,11 @@ const handleImageOverlayMouseDown = (event: MouseEvent, overlayId: string) => {
   panStart.y = event.clientY;
   panStartImagePos.x = overlay.transform.x;
   panStartImagePos.y = overlay.transform.y;
+  pendingImageDragPosition.x = overlay.transform.x;
+  pendingImageDragPosition.y = overlay.transform.y;
+  isGuideBypassActive.value = isQBypassHeld.value;
   document.body.style.userSelect = 'none';
-  document.addEventListener('mousemove', handleImageMouseMove);
-  document.addEventListener('mouseup', handleImageMouseUpOrLeave);
+  beginCapturedCanvasDrag(event, handleImageMouseMove, handleImageMouseUpOrLeave);
 };
 
 const enableImageOverlayDragFromCanvas = (event: MouseEvent, overlayId: string) => {
@@ -2628,7 +3242,7 @@ const handleImageOverlayWheel = (event: WheelEvent, overlayId: string) => {
 };
 
 // --- Chat Dragging Handlers ---
-const handleChatMouseDown = (event: MouseEvent, overlayId: string) => {
+const handleChatMouseDown = (event: PointerEvent, overlayId: string) => {
   selectChatOverlay(overlayId);
 
   const overlay = chatOverlays.value.find((item) => item.id === overlayId);
@@ -2649,25 +3263,50 @@ const handleChatMouseDown = (event: MouseEvent, overlayId: string) => {
   chatPanStart.y = event.clientY;
   chatPanStartPos.x = overlay.transform.x;
   chatPanStartPos.y = overlay.transform.y;
+  pendingChatDragPosition.x = overlay.transform.x;
+  pendingChatDragPosition.y = overlay.transform.y;
   document.body.style.userSelect = 'none';
-  document.addEventListener('mousemove', handleChatMouseMove);
-  document.addEventListener('mouseup', handleChatMouseUpOrLeave);
+  beginCapturedCanvasDrag(event, handleChatMouseMove, handleChatMouseUpOrLeave);
 };
 
-const handleChatMouseMove = (event: MouseEvent) => {
+const handleChatMouseMove = (event: PointerEvent) => {
   if (!isChatPanning.value || !activeChatOverlay.value) return;
   
   // Prevent event from being handled by image drag
   event.stopPropagation();
   
-  const deltaX = event.clientX - chatPanStart.x;
-  const deltaY = event.clientY - chatPanStart.y;
-  activeChatOverlay.value.transform.x = chatPanStartPos.x + deltaX;
-  activeChatOverlay.value.transform.y = chatPanStartPos.y + deltaY;
+  const interactionScale = getCanvasInteractionScale();
+  const deltaX = (event.clientX - chatPanStart.x) / interactionScale;
+  const deltaY = (event.clientY - chatPanStart.y) / interactionScale;
+  const element = chatOverlayElementMap.get(activeChatOverlay.value.id);
+  const proposedX = chatPanStartPos.x + deltaX;
+  const proposedY = chatPanStartPos.y + deltaY;
+
+  if (element) {
+    const snappedPosition = applySmartGuides(
+      'chat',
+      activeChatOverlay.value.id,
+      getChatOverlayGuideBounds(activeChatOverlay.value, element, proposedX, proposedY),
+      false
+    );
+    pendingChatDragPosition.x = snappedPosition.x;
+    pendingChatDragPosition.y = snappedPosition.y;
+  } else {
+    clearSmartGuides();
+    pendingChatDragPosition.x = proposedX;
+    pendingChatDragPosition.y = proposedY;
+  }
+
+  scheduleImmediateChatDragPosition();
 };
 
-const handleChatMouseUpOrLeave = (event?: MouseEvent) => {
+const handleChatMouseUpOrLeave = (event?: PointerEvent) => {
   if (isChatPanning.value) {
+    if (activeChatOverlay.value) {
+      activeChatOverlay.value.transform.x = pendingChatDragPosition.x;
+      activeChatOverlay.value.transform.y = pendingChatDragPosition.y;
+    }
+
     if (event) {
       event.stopPropagation();
     }
@@ -2675,8 +3314,13 @@ const handleChatMouseUpOrLeave = (event?: MouseEvent) => {
     document.body.style.userSelect = '';
   }
 
-  document.removeEventListener('mousemove', handleChatMouseMove);
-  document.removeEventListener('mouseup', handleChatMouseUpOrLeave);
+  clearSmartGuides();
+
+  if (chatDragAnimationFrame !== null) {
+    window.cancelAnimationFrame(chatDragAnimationFrame);
+    chatDragAnimationFrame = null;
+  }
+
 };
 
 // --- Chat Zoom Handler ---
@@ -2722,9 +3366,7 @@ const handleResizeMouseDown = (event: MouseEvent) => {
   // Prevent default behavior (like text selection)
   event.preventDefault();
   event.stopPropagation();
-  
-  console.log("Starting resize...");
-  
+
   // Record starting coordinates and initial width
   resizeStartX.value = event.clientX;
   
@@ -2772,8 +3414,6 @@ const handleResizeMouseMove = (event: MouseEvent) => {
     // This ensures the chat panel stays visible even with wide drop zones
     const minPercentForCurrentWidth = (minWidthPx / parentWidth) * 100;
     minWidthPercent = Math.max(minWidthPercent, minPercentForCurrentWidth);
-    
-    console.log(`Adjusted min width: ${minWidthPercent.toFixed(2)}% (${minWidthPx}px)`);
   }
   
   // Clamp the value to reasonable boundaries
@@ -2783,8 +3423,6 @@ const handleResizeMouseMove = (event: MouseEvent) => {
   // Apply the new width percentage
   chatPanelFlexBasis.value = `${newBasis}%`;
   mainContentFlexBasis.value = `${100 - newBasis}%`;
-  
-  console.log(`Resizing: delta=${deltaX.toFixed(0)}px (${deltaPercent.toFixed(2)}%), new width=${newBasis.toFixed(2)}%`);
 };
 
 const handleResizeMouseUp = () => {
@@ -2796,8 +3434,6 @@ const handleResizeMouseUp = () => {
   // Remove the event listeners
   document.removeEventListener('mousemove', handleResizeMouseMove);
   document.removeEventListener('mouseup', handleResizeMouseUp);
-  
-  console.log("Resize complete");
 };
 
 const getImageOverlayStyles = (overlay: ImageOverlay) => {
@@ -2813,6 +3449,7 @@ const getImageOverlayStyles = (overlay: ImageOverlay) => {
     transformOrigin: 'top left',
     transform: `translate(${overlay.transform.x}px, ${overlay.transform.y}px) scale(${overlay.transform.scale})`,
     opacity: String(overlay.opacity),
+    willChange: isPanning.value && isActiveOverlay ? 'transform' : 'auto',
     cursor: overlay.isLocked
       ? 'not-allowed'
       : isImageDraggingEnabled.value
@@ -2820,7 +3457,7 @@ const getImageOverlayStyles = (overlay: ImageOverlay) => {
         : 'pointer',
     outline: isActiveOverlay ? `1px dashed ${overlay.isLocked ? 'rgba(239, 83, 80, 0.9)' : 'rgba(66, 165, 245, 0.9)'}` : 'none',
     outlineOffset: '2px',
-    zIndex: 1 + Math.max(overlayIndex, 0)
+    zIndex: overlay.acceptsEffects ? 1 + Math.max(overlayIndex, 0) : 200 + Math.max(overlayIndex, 0)
   };
 };
 
@@ -2893,6 +3530,13 @@ const toggleImageOverlayLock = (overlayId: string) => {
   }
 };
 
+const toggleImageOverlayEffects = (overlayId: string) => {
+  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
+  if (!overlay) return;
+
+  overlay.acceptsEffects = !overlay.acceptsEffects;
+};
+
 const resetActiveImageOverlayView = () => {
   if (!activeImageOverlay.value) return;
 
@@ -2930,6 +3574,15 @@ const getChatStyles = (overlay: ChatOverlay) => {
     outlineOffset: '2px',
   };
 };
+
+const effectAwareImageOverlays = computed(() => {
+  const visibleOverlays = imageOverlays.value.filter((overlay) => !overlay.isHidden && overlay.src);
+
+  return {
+    affected: visibleOverlays.filter((overlay) => overlay.acceptsEffects),
+    unaffected: visibleOverlays.filter((overlay) => !overlay.acceptsEffects)
+  };
+});
 
 // Update the saveImage function to ensure 1:1 positioning match with preview
 const saveImage = async () => {
@@ -2997,34 +3650,42 @@ const saveImage = async () => {
 
     ctx.restore(); // Restore context after drawing image
 
-    const visibleImageOverlays = imageOverlays.value.filter((overlay) => !overlay.isHidden && overlay.src);
+    const drawOverlayCollection = async (overlays: ImageOverlay[]) => {
+      for (const overlay of overlays) {
+        const overlayImage = new Image();
+        overlayImage.src = overlay.src;
+        await new Promise((resolve, reject) => {
+          overlayImage.onload = resolve;
+          overlayImage.onerror = reject;
+        });
 
-    for (const overlay of visibleImageOverlays) {
-      const overlayImage = new Image();
-      overlayImage.src = overlay.src;
-      await new Promise((resolve, reject) => {
-        overlayImage.onload = resolve;
-        overlayImage.onerror = reject;
+        ctx.save();
+        ctx.globalAlpha = overlay.opacity;
+        ctx.translate(overlay.transform.x, overlay.transform.y);
+        ctx.scale(overlay.transform.scale, overlay.transform.scale);
+        ctx.drawImage(overlayImage, 0, 0);
+        ctx.restore();
+      }
+    };
+
+    const drawActiveImageEffects = () => {
+      activeImageEffectLayers.value.forEach(({ effect, preset }) => {
+        const effectCanvas = buildImageEffectCanvas(effect, canvas.width, canvas.height);
+        if (!effectCanvas) return;
+
+        ctx.save();
+        ctx.globalAlpha = effect.opacity;
+        ctx.globalCompositeOperation = preset.blendMode;
+        ctx.drawImage(effectCanvas, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
       });
+    };
 
-      ctx.save();
-      ctx.globalAlpha = overlay.opacity;
-      ctx.translate(overlay.transform.x, overlay.transform.y);
-      ctx.scale(overlay.transform.scale, overlay.transform.scale);
-      ctx.drawImage(overlayImage, 0, 0);
-      ctx.restore();
+    await drawOverlayCollection(effectAwareImageOverlays.value.affected);
+    if (activeImageEffectLayers.value.length > 0) {
+      drawActiveImageEffects();
     }
-
-    activeImageEffectLayers.value.forEach(({ effect, preset }) => {
-      const effectCanvas = buildImageEffectCanvas(effect, canvas.width, canvas.height);
-      if (!effectCanvas) return;
-
-      ctx.save();
-      ctx.globalAlpha = effect.opacity;
-      ctx.globalCompositeOperation = preset.blendMode;
-      ctx.drawImage(effectCanvas, 0, 0, canvas.width, canvas.height);
-      ctx.restore();
-    });
+    await drawOverlayCollection(effectAwareImageOverlays.value.unaffected);
 
     const visibleChatOverlays = chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0);
 
@@ -3487,7 +4148,6 @@ const addCustomColorSwatch = () => {
 // Update handleTextSelection to work with textarea
 const handleTextSelection = () => {
   const selection = window.getSelection();
-  console.log('Selection event triggered', selection?.toString());
   
   if (!selection || selection.toString().trim() === '') {
     selectedText.lineIndex = -1;
@@ -3513,7 +4173,6 @@ const handleTextSelection = () => {
       // Check if selection is in this line
       const selectionStart = textarea.selectionStart;
       if (selectionStart >= lineStart && selectionStart < lineEnd) {
-        console.log('Found selection in line:', i, lines[i]);
         const rawStartOffset = selectionStart - lineStart;
         const rawEndOffset = textarea.selectionEnd - lineStart;
         const displayedSelection = getDisplayedSelectionRange(lines[i], rawStartOffset, rawEndOffset);
@@ -3527,19 +4186,17 @@ const handleTextSelection = () => {
       
       currentPos += lineLength;
     }
-    
-    console.log('Selection state:', selectedText);
   } catch (error) {
     console.error('Error handling text selection:', error);
   }
 };
 
 // Save editor state to cookie
-const saveEditorState = () => {
+const saveEditorState = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => {
   if (typeof window === 'undefined') return;
 
   const state: PersistedEditorSession = {
-    snapshot: toSerializableSnapshot(createEditorSnapshot()),
+    snapshot: toSerializableSnapshot(snapshot),
     currentProjectId: currentProjectId.value,
     currentProjectName: currentProjectName.value
   };
@@ -3641,6 +4298,18 @@ const loadNavigatorPreference = () => {
   showNavigator.value = storedPreference !== 'false';
 };
 
+const loadSmartGuidePreferences = () => {
+  if (typeof window === 'undefined') return;
+
+  const storedEnabled = window.localStorage.getItem(SMART_GUIDES_ENABLED_STORAGE_KEY);
+  smartGuidesEnabled.value = storedEnabled !== 'false';
+
+  const storedStrength = Number(window.localStorage.getItem(SMART_GUIDE_STRENGTH_STORAGE_KEY));
+  if (Number.isFinite(storedStrength)) {
+    smartGuideStrength.value = Math.min(24, Math.max(2, storedStrength));
+  }
+};
+
 const goToNextTutorialStep = () => {
   if (tutorialStepIndex.value >= tutorialSteps.length - 1) {
     trackEvent('tutorial_complete', {
@@ -3665,12 +4334,19 @@ const initializeLayoutValues = () => {
   chatPanelFlexBasis.value = '25%';
   mainContentFlexBasis.value = '75%';
   utilityPanelWidth.value = 320;
-  
-  // Ensure consistent size of both panels
-  console.log('Layout initialized with main content: 75%, chat panel: 25%');
 };
 
-// Watch for changes that should trigger state save
+const scheduleEditorStatePersist = () => {
+  if (editorStatePersistTimer) {
+    clearTimeout(editorStatePersistTimer);
+  }
+
+  editorStatePersistTimer = setTimeout(() => {
+    editorStatePersistTimer = null;
+    saveEditorState();
+  }, 250);
+};
+
 watch([
   chatlogText,
   dropZoneWidth,
@@ -3687,11 +4363,11 @@ watch([
   () => ({ ...selectedText }),
   chatLineWidth
 ], () => {
-  saveEditorState();
+  scheduleEditorStatePersist();
 }, { deep: true });
 
 watch([currentProjectId, currentProjectName], () => {
-  saveEditorState();
+  scheduleEditorStatePersist();
 });
 
 // Load saved state when component mounts
@@ -3700,6 +4376,7 @@ onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload);
   window.addEventListener('keydown', handleEditorHistoryKeydown);
   loadNavigatorPreference();
+  loadSmartGuidePreferences();
   loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
@@ -3711,16 +4388,12 @@ onMounted(() => {
   
   // Make sure layout is initialized correctly
   initializeLayoutValues();
-  
-  // Calculate initial scale
-  setTimeout(() => {
-    calculateDropzoneScale();
-    
-    // Add window resize listener
-    window.addEventListener('resize', () => {
-      calculateDropzoneScale();
-    });
-  }, 100);
+
+  windowResizeHandler = () => {
+    scheduleDropzoneScaleCalculation();
+  };
+  window.addEventListener('resize', windowResizeHandler);
+  scheduleDropzoneScaleCalculation();
 });
 
 onUnmounted(() => {
@@ -3730,10 +4403,24 @@ onUnmounted(() => {
   if (projectAutosaveTimer) {
     clearTimeout(projectAutosaveTimer);
   }
-  document.removeEventListener('mousemove', handleImageMouseMove);
-  document.removeEventListener('mouseup', handleImageMouseUpOrLeave);
+  if (editorStatePersistTimer) {
+    clearTimeout(editorStatePersistTimer);
+  }
+  if (dropzoneScaleAnimationFrame !== null) {
+    window.cancelAnimationFrame(dropzoneScaleAnimationFrame);
+  }
+  if (imageDragAnimationFrame !== null) {
+    window.cancelAnimationFrame(imageDragAnimationFrame);
+  }
+  if (chatDragAnimationFrame !== null) {
+    window.cancelAnimationFrame(chatDragAnimationFrame);
+  }
+  activeCanvasDragCleanup?.();
   window.removeEventListener('beforeunload', handleBeforeUnload);
   window.removeEventListener('keydown', handleEditorHistoryKeydown);
+  if (windowResizeHandler) {
+    window.removeEventListener('resize', windowResizeHandler);
+  }
   unsavedNavigationStore.reset();
   handleChatMouseUpOrLeave();
 });
@@ -3745,6 +4432,27 @@ watch(hasUnsavedChanges, (value) => {
 watch(showNavigator, (value) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(SHOW_NAVIGATOR_STORAGE_KEY, String(value));
+});
+
+watch(smartGuidesEnabled, (value) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(SMART_GUIDES_ENABLED_STORAGE_KEY, String(value));
+
+  if (!value) {
+    clearSmartGuides();
+  }
+});
+
+watch(smartGuideStrength, (value) => {
+  if (typeof window === 'undefined') return;
+
+  const clampedValue = Math.min(24, Math.max(2, value));
+  if (clampedValue !== value) {
+    smartGuideStrength.value = clampedValue;
+    return;
+  }
+
+  window.localStorage.setItem(SMART_GUIDE_STRENGTH_STORAGE_KEY, String(clampedValue));
 });
 
 watch(() => getSnapshotSignature(), () => {
@@ -4750,6 +5458,37 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
           <div class="settings-section mb-6">
             <div class="settings-section-header">
+              <div class="text-subtitle-1">Smart Guides</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Control Photoshop-style snapping, alignment guides, and equal spacing guides while dragging layers.
+              </div>
+            </div>
+            <v-switch
+              v-model="smartGuidesEnabled"
+              color="primary"
+              inset
+              hide-details
+              label="Enable Smart Guides and snapping"
+            ></v-switch>
+            <div class="text-caption text-medium-emphasis mt-4 mb-2">
+              Snap strength: {{ smartGuideStrength }} px
+            </div>
+            <v-slider
+              v-model="smartGuideStrength"
+              min="2"
+              max="24"
+              step="1"
+              color="primary"
+              hide-details
+              :disabled="!smartGuidesEnabled"
+            ></v-slider>
+            <div class="text-caption text-medium-emphasis mt-2">
+              Turn Smart Guides off here anytime you want completely free movement.
+            </div>
+          </div>
+
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
               <div class="text-subtitle-1">Ads</div>
               <div class="text-body-2 text-medium-emphasis">
                 Keep a small home page ad slot visible to help offset hosting, or disable ads entirely for free.
@@ -5040,7 +5779,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
         </div>
 
         <div class="text-body-2 mb-4">
-          Stack texture and finishing layers over the screenshot to push the final mood. Every active effect previews live and exports in the same order shown here.
+          Stack texture and finishing layers over the screenshot to push the final mood. Base image is always affected, and each image overlay can opt in or stay clean from its own layer controls.
         </div>
 
         <div class="effect-preset-list">
@@ -5067,7 +5806,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                 </v-btn>
               </div>
 
-              <div v-if="getImageEffectLayer(preset.id)" class="mt-4">
+              <div v-if="getImageEffectLayer(preset.id) && preset.supportsOpacity !== false" class="mt-4">
                 <div class="d-flex align-center justify-space-between mb-2">
                   <span class="text-caption text-medium-emphasis">Opacity</span>
                   <span class="text-caption text-medium-emphasis">
@@ -5349,122 +6088,169 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               ></div>
             </div>
           </v-sheet>
-          <div class="d-flex align-center justify-space-between mb-2">
-            <div class="text-subtitle-1">Image Layers</div>
-            <v-btn
-              size="small"
-              variant="tonal"
-              color="primary"
-              prepend-icon="mdi-image-multiple-outline"
-              @click="triggerImageOverlayInput"
-            >
-              Add Image
-            </v-btn>
-          </div>
-          <div class="chat-layer-list mb-3">
-            <v-list density="compact" class="pa-0" bg-color="transparent">
-              <v-list-item
-                :active="activeImageOverlayId === null"
-                rounded="lg"
-                @click="selectImageOverlay(null)"
+          <div class="utility-panel-main">
+            <div class="utility-panel-section-header d-flex align-center justify-space-between mb-2">
+              <div class="text-subtitle-1">Image Layers</div>
+              <v-btn
+                size="small"
+                variant="tonal"
+                color="primary"
+                prepend-icon="mdi-image-multiple-outline"
+                @click="triggerImageOverlayInput"
               >
-                <template v-slot:prepend>
-                  <v-icon icon="mdi-image-outline" size="small"></v-icon>
-                </template>
-                <v-list-item-title>Base Screenshot</v-list-item-title>
-                <v-list-item-subtitle>
-                  {{ droppedImageSrc ? 'Primary canvas image' : 'No screenshot loaded yet' }}
-                </v-list-item-subtitle>
-                <template v-slot:append>
-                  <v-btn
-                    icon="mdi-fit-to-screen-outline"
-                    size="x-small"
-                    variant="text"
-                    :disabled="!droppedImageSrc"
-                    @click.stop="resetImageView"
-                  ></v-btn>
-                </template>
-              </v-list-item>
-              <v-list-item
-                v-for="overlay in imageOverlays"
-                :key="overlay.id"
-                :active="overlay.id === activeImageOverlayId"
-                class="image-layer-list-item"
-                rounded="lg"
-                @click="selectImageOverlay(overlay.id)"
-              >
-                <template v-slot:prepend>
-                  <div class="image-layer-thumbnail-wrap">
-                    <img
-                      :src="overlay.src"
-                      :alt="overlay.name"
-                      class="image-layer-thumbnail"
-                    />
-                    <div v-if="overlay.isHidden" class="image-layer-thumbnail-badge">
-                      <v-icon icon="mdi-eye-off-outline" size="x-small"></v-icon>
+                Add Image
+              </v-btn>
+            </div>
+            <div class="image-layer-scroll-region mb-3">
+              <div class="chat-layer-list">
+                <v-list density="compact" class="pa-0" bg-color="transparent">
+                  <v-list-item
+                    :active="activeImageOverlayId === null"
+                    rounded="lg"
+                    @click="selectImageOverlay(null)"
+                  >
+                    <template v-slot:prepend>
+                      <v-icon icon="mdi-image-outline" size="small"></v-icon>
+                    </template>
+                    <v-list-item-title>Base Screenshot</v-list-item-title>
+                    <v-list-item-subtitle>
+                      {{ droppedImageSrc ? 'Primary canvas image' : 'No screenshot loaded yet' }}
+                    </v-list-item-subtitle>
+                    <template v-slot:append>
+                      <v-btn
+                        icon="mdi-fit-to-screen-outline"
+                        size="x-small"
+                        variant="text"
+                        :disabled="!droppedImageSrc"
+                        @click.stop="resetImageView"
+                      ></v-btn>
+                    </template>
+                  </v-list-item>
+                  <v-list-item
+                    v-for="overlay in imageOverlays"
+                    :key="overlay.id"
+                    :active="overlay.id === activeImageOverlayId"
+                    class="image-layer-list-item"
+                    rounded="lg"
+                    @click="selectImageOverlay(overlay.id)"
+                  >
+                    <template v-slot:prepend>
+                      <div class="image-layer-thumbnail-wrap">
+                        <img
+                          :src="overlay.src"
+                          :alt="overlay.name"
+                          class="image-layer-thumbnail"
+                        />
+                        <div v-if="overlay.isHidden" class="image-layer-thumbnail-badge">
+                          <v-icon icon="mdi-eye-off-outline" size="x-small"></v-icon>
+                        </div>
+                      </div>
+                    </template>
+                    <div class="image-layer-item-main">
+                      <div class="image-layer-item-name" :title="overlay.name">
+                        {{ overlay.name }}
+                      </div>
+                      <div class="image-layer-item-meta">
+                        Layer {{ imageOverlays.findIndex((item) => item.id === overlay.id) + 1 }} of {{ imageOverlays.length }} · {{ Math.round(overlay.opacity * 100) }}% opacity
+                        <span>{{ overlay.acceptsEffects ? ' • Effects On' : ' • Effects Off' }}</span>
+                        <span v-if="overlay.isHidden"> • Hidden</span>
+                        <span v-if="overlay.isLocked"> • Locked</span>
+                      </div>
+                      <div class="image-layer-item-actions">
+                        <v-tooltip text="Move this layer higher in the stack" location="top">
+                          <template v-slot:activator="{ props }">
+                            <v-btn
+                              v-bind="props"
+                              icon="mdi-arrow-down-bold-outline"
+                              size="x-small"
+                              variant="text"
+                              :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === imageOverlays.length - 1"
+                              @click.stop="moveImageOverlay(overlay.id, 'forward')"
+                            ></v-btn>
+                          </template>
+                        </v-tooltip>
+                        <v-tooltip text="Move this layer lower in the stack" location="top">
+                          <template v-slot:activator="{ props }">
+                            <v-btn
+                              v-bind="props"
+                              icon="mdi-arrow-up-bold-outline"
+                              size="x-small"
+                              variant="text"
+                              :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === 0"
+                              @click.stop="moveImageOverlay(overlay.id, 'backward')"
+                            ></v-btn>
+                          </template>
+                        </v-tooltip>
+                        <v-tooltip :text="overlay.acceptsEffects ? 'Effects are enabled for this layer' : 'Effects are disabled for this layer'" location="top">
+                          <template v-slot:activator="{ props }">
+                            <v-btn
+                              v-bind="props"
+                              :icon="overlay.acceptsEffects ? 'mdi-image-filter-center-focus' : 'mdi-image-filter-center-focus-weak'"
+                              size="x-small"
+                              variant="text"
+                              :color="overlay.acceptsEffects ? 'primary' : undefined"
+                              @click.stop="toggleImageOverlayEffects(overlay.id)"
+                            ></v-btn>
+                          </template>
+                        </v-tooltip>
+                        <v-tooltip :text="overlay.isHidden ? 'Show this layer' : 'Hide this layer'" location="top">
+                          <template v-slot:activator="{ props }">
+                            <v-btn
+                              v-bind="props"
+                              :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
+                              size="x-small"
+                              variant="text"
+                              @click.stop="toggleImageOverlayVisibility(overlay.id)"
+                            ></v-btn>
+                          </template>
+                        </v-tooltip>
+                        <v-tooltip :text="overlay.isLocked ? 'Unlock this layer for editing' : 'Lock this layer to prevent editing'" location="top">
+                          <template v-slot:activator="{ props }">
+                            <v-btn
+                              v-bind="props"
+                              :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
+                              size="x-small"
+                              variant="text"
+                              @click.stop="toggleImageOverlayLock(overlay.id)"
+                            ></v-btn>
+                          </template>
+                        </v-tooltip>
+                        <v-tooltip text="Duplicate this layer" location="top">
+                          <template v-slot:activator="{ props }">
+                            <v-btn
+                              v-bind="props"
+                              icon="mdi-content-copy"
+                              size="x-small"
+                              variant="text"
+                              @click.stop="duplicateImageOverlay(overlay.id)"
+                            ></v-btn>
+                          </template>
+                        </v-tooltip>
+                        <v-tooltip text="Delete this layer" location="top">
+                          <template v-slot:activator="{ props }">
+                            <v-btn
+                              v-bind="props"
+                              icon="mdi-delete-outline"
+                              size="x-small"
+                              variant="text"
+                              color="error"
+                              @click.stop="removeImageOverlay(overlay.id)"
+                            ></v-btn>
+                          </template>
+                        </v-tooltip>
+                      </div>
                     </div>
-                  </div>
-                </template>
-                <div class="image-layer-item-main">
-                  <div class="image-layer-item-name" :title="overlay.name">
-                    {{ overlay.name }}
-                  </div>
-                  <div class="image-layer-item-meta">
-                    Layer {{ imageOverlays.findIndex((item) => item.id === overlay.id) + 1 }} of {{ imageOverlays.length }} · {{ Math.round(overlay.opacity * 100) }}% opacity
-                    <span v-if="overlay.isHidden"> • Hidden</span>
-                    <span v-if="overlay.isLocked"> • Locked</span>
-                  </div>
-                  <div class="image-layer-item-actions">
-                    <v-btn
-                      icon="mdi-arrow-down-bold-outline"
-                      size="x-small"
-                      variant="text"
-                      :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === imageOverlays.length - 1"
-                      @click.stop="moveImageOverlay(overlay.id, 'forward')"
-                    ></v-btn>
-                    <v-btn
-                      icon="mdi-arrow-up-bold-outline"
-                      size="x-small"
-                      variant="text"
-                      :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === 0"
-                      @click.stop="moveImageOverlay(overlay.id, 'backward')"
-                    ></v-btn>
-                    <v-btn
-                      :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
-                      size="x-small"
-                      variant="text"
-                      @click.stop="toggleImageOverlayVisibility(overlay.id)"
-                    ></v-btn>
-                    <v-btn
-                      :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
-                      size="x-small"
-                      variant="text"
-                      @click.stop="toggleImageOverlayLock(overlay.id)"
-                    ></v-btn>
-                    <v-btn
-                      icon="mdi-content-copy"
-                      size="x-small"
-                      variant="text"
-                      @click.stop="duplicateImageOverlay(overlay.id)"
-                    ></v-btn>
-                    <v-btn
-                      icon="mdi-delete-outline"
-                      size="x-small"
-                      variant="text"
-                      color="error"
-                      @click.stop="removeImageOverlay(overlay.id)"
-                    ></v-btn>
-                  </div>
+                  </v-list-item>
+                </v-list>
+                <div v-if="imageOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
+                  Add PNG, JPG, WEBP, or any browser-supported image to stack props, decals, or cutouts over the screenshot.
                 </div>
-              </v-list-item>
-            </v-list>
-            <div v-if="imageOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
-              Add PNG, JPG, WEBP, or any browser-supported image to stack props, decals, or cutouts over the screenshot.
+              </div>
             </div>
           </div>
           <v-sheet
             v-if="activeImageOverlay"
-            class="censored-region-panel mb-3"
+            class="censored-region-panel image-layer-detail-panel"
             border
             rounded="lg"
           >
@@ -5507,6 +6293,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
         <!-- Add aspect ratio container to enforce proper ratio -->
         <div class="aspect-ratio-container" :style="aspectRatioContainerStyle">
           <v-sheet 
+            ref="dropZoneRef"
             class="drop-zone d-flex align-center justify-center pa-0"
             :class="{ 
               'is-dragging-over': isDraggingOverDropZone,
@@ -5527,6 +6314,26 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <div v-if="isScaledDown" class="scale-indicator">
               {{ scaleIndicator }}
             </div>
+            <div
+              v-for="guide in smartGuideLines"
+              :key="`${guide.kind}-${guide.orientation}-${guide.position}-${guide.start}-${guide.end}`"
+              :class="[
+                'smart-guide-line',
+                `smart-guide-line-${guide.orientation}`,
+                `smart-guide-line-${guide.kind}`
+              ]"
+              :style="guide.orientation === 'vertical'
+                ? { left: `${guide.position}px`, top: `${guide.start}px`, height: `${Math.max(0, guide.end - guide.start)}px` }
+                : { top: `${guide.position}px`, left: `${guide.start}px`, width: `${Math.max(0, guide.end - guide.start)}px` }"
+            ></div>
+            <div
+              v-for="label in smartGuideLabels"
+              :key="`${label.text}-${label.x}-${label.y}`"
+              class="smart-guide-label"
+              :style="{ left: `${label.x}px`, top: `${label.y}px` }"
+            >
+              {{ label.text }}
+            </div>
             
             <!-- Display Dropped Image -->
             <img 
@@ -5538,12 +6345,13 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               :style="imageStyle as CSSProperties"
               draggable="false"
               @dragstart="preventNativePreviewDrag"
-              @mousedown="handleImageMouseDown"
+              @pointerdown="handleImageMouseDown"
               @dblclick="enableImageDragFromCanvas"
             />
             <img
-              v-for="overlay in imageOverlays"
-              v-show="droppedImageSrc && !overlay.isHidden"
+              v-for="overlay in effectAwareImageOverlays.affected"
+              v-show="droppedImageSrc"
+              :ref="(element) => setImageOverlayElement(overlay.id, element)"
               :key="overlay.id"
               :src="overlay.src"
               :alt="overlay.name"
@@ -5551,7 +6359,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               :style="getImageOverlayStyles(overlay) as CSSProperties"
               draggable="false"
               @dragstart="preventNativePreviewDrag"
-              @mousedown.stop="handleImageOverlayMouseDown($event, overlay.id)"
+              @pointerdown.stop="handleImageOverlayMouseDown($event, overlay.id)"
               @dblclick.stop.prevent="enableImageOverlayDragFromCanvas($event, overlay.id)"
               @wheel="handleImageOverlayWheel($event, overlay.id)"
             />
@@ -5563,6 +6371,21 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               :style="getImageEffectPreviewStyle(preview) as CSSProperties"
               @dragstart="preventNativePreviewDrag"
             ></div>
+            <img
+              v-for="overlay in effectAwareImageOverlays.unaffected"
+              v-show="droppedImageSrc"
+              :ref="(element) => setImageOverlayElement(overlay.id, element)"
+              :key="overlay.id"
+              :src="overlay.src"
+              :alt="overlay.name"
+              class="dropped-image image-overlay-layer"
+              :style="getImageOverlayStyles(overlay) as CSSProperties"
+              draggable="false"
+              @dragstart="preventNativePreviewDrag"
+              @pointerdown.stop="handleImageOverlayMouseDown($event, overlay.id)"
+              @dblclick.stop.prevent="enableImageOverlayDragFromCanvas($event, overlay.id)"
+              @wheel="handleImageOverlayWheel($event, overlay.id)"
+            />
             <!-- Display Placeholder -->
             <div v-if="!droppedImageSrc" class="text-center">
               <v-icon size="x-large" color="grey-darken-1">mdi-paperclip</v-icon>
@@ -5573,12 +6396,11 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <div
               v-for="overlay in chatOverlays"
               v-show="overlay.parsedLines.length > 0 && droppedImageSrc && !overlay.isHidden"
+              :ref="(element) => setChatOverlayElement(overlay.id, element)"
               :key="`${overlay.id}-${renderKey}`"
               class="chat-overlay"
-              @mousedown.stop="handleChatMouseDown($event, overlay.id)"
+              @pointerdown.stop="handleChatMouseDown($event, overlay.id)"
               @dblclick.stop.prevent="enableChatDragFromCanvas($event, overlay.id)"
-              @mousemove="handleChatMouseMove"
-              @mouseup="handleChatMouseUpOrLeave"
               @wheel="handleChatWheel($event, overlay.id)"
               @dragstart="preventNativePreviewDrag"
               :style="getChatStyles(overlay)"
@@ -5999,6 +6821,39 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   margin-right: -6px;
 }
 
+.utility-panel-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.utility-panel-section-header {
+  flex-shrink: 0;
+}
+
+.image-layer-scroll-region {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  margin-right: -4px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.image-layer-scroll-region::after {
+  content: '';
+  display: block;
+  height: 4px;
+}
+
+.image-layer-detail-panel {
+  flex-shrink: 0;
+  margin-top: 12px;
+}
+
 .selected-image-layer-name {
   max-width: 128px;
   padding: 4px 8px;
@@ -6339,6 +7194,8 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 .chatlog-panel-sheet {
   background: #131213 !important;
   color: #f3f4f6 !important;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .utility-panel-sheet :deep(.text-medium-emphasis),
@@ -6619,6 +7476,42 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   z-index: 10;
   pointer-events: none;
   border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.smart-guide-line {
+  position: absolute;
+  pointer-events: none;
+  z-index: 300;
+  background: rgba(66, 165, 245, 0.92);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.smart-guide-line-vertical {
+  width: 1px;
+}
+
+.smart-guide-line-horizontal {
+  height: 1px;
+}
+
+.smart-guide-line-spacing {
+  background: rgba(255, 193, 7, 0.95);
+  box-shadow: 0 0 0 1px rgba(19, 18, 19, 0.25);
+}
+
+.smart-guide-label {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 301;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(19, 18, 19, 0.92);
+  color: #f8fafc;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  border: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 </style>

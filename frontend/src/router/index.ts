@@ -2,15 +2,10 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation'
 
-
-// Home View component
-import HomeView from '../views/HomeView.vue'
-// SS Magician component
-import ScreenshotMagician from '../views/ScreenshotMagician.vue'
-// Terms of Use component
-import TermsOfUse from '../views/TermsOfUse.vue'
-// Privacy Policy component
-import PrivacyPolicy from '../views/PrivacyPolicy.vue'
+const HomeView = () => import('../views/HomeView.vue')
+const ScreenshotMagician = () => import('../views/ScreenshotMagician.vue')
+const TermsOfUse = () => import('../views/TermsOfUse.vue')
+const PrivacyPolicy = () => import('../views/PrivacyPolicy.vue')
 
 // Create the router
 const router = createRouter({

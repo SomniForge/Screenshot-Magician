@@ -3,11 +3,39 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.22-beta'; // Incremented version
+const version = 'v2.0.23-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.23-beta',
+        date: 'APR-21-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added Photoshop-style Smart Guides for chat layers and image overlays, including canvas alignment guides and equal-spacing guides between nearby objects',
+                    'Added Smart Guides controls in Settings so snapping can be enabled or disabled and snap strength can be adjusted'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved canvas drag responsiveness by moving active drag visuals through a faster direct transform path before committing final positions on release',
+                    'Improved drag fidelity so chat elements and image layers track the cursor much more closely during movement',
+                    'Improved startup performance with route-level code splitting and vendor chunking to reduce initial app boot cost'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed the Navigator so it updates live again while moving or resizing the base screenshot instead of waiting until release',
+                    'Fixed subtle chat-layer drag rendering issues introduced by compositor promotion during mousedown'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.22-beta',
         date: 'APR-20-2026',
