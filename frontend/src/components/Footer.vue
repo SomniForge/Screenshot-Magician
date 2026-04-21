@@ -3,11 +3,24 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.24-beta';
+const version = 'v2.0.25-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.25-beta',
+        date: 'APR-21-2026',
+        changes: [
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed Navigator viewport alignment so the blue preview box now matches the base screenshot position on the canvas much more precisely',
+                    'Fixed Navigator preview rendering so the minimap always shows the full base screenshot without introducing crop drift'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.24-beta',
         date: 'APR-21-2026',

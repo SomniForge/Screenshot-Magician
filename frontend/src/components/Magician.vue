@@ -851,40 +851,95 @@ const minimapSize = computed(() => {
 
   const scale = Math.min(maxWidth / width, maxHeight / height);
   return {
-    width: Math.max(96, Math.round(width * scale)),
-    height: Math.max(64, Math.round(height * scale))
+    width: width * scale,
+    height: height * scale
   };
 });
 
-const minimapViewport = computed(() => {
+const getLiveBaseImageTransform = () => (
+  activeImageDragTarget.value === 'base' && isPanning.value
+    ? pendingImageDragPosition
+    : imageTransform
+);
+
+const getBaseImageViewportBounds = () => {
   const zoneWidth = dropZoneWidth.value || 800;
   const zoneHeight = dropZoneHeight.value || 600;
-  const centerX = zoneWidth / 2;
-  const centerY = zoneHeight / 2;
   const { width, height, offsetX, offsetY } = imageFitDimensions.value;
-  const liveImageTransform = activeImageDragTarget.value === 'base' && isPanning.value
-    ? pendingImageDragPosition
-    : imageTransform;
+  const liveImageTransform = getLiveBaseImageTransform();
   const scale = imageTransform.scale || 1;
 
-  const visibleLeft = ((((0 - liveImageTransform.x - centerX) / scale) + centerX) - offsetX);
-  const visibleTop = ((((0 - liveImageTransform.y - centerY) / scale) + centerY) - offsetY);
-  const visibleRight = ((((zoneWidth - liveImageTransform.x - centerX) / scale) + centerX) - offsetX);
-  const visibleBottom = ((((zoneHeight - liveImageTransform.y - centerY) / scale) + centerY) - offsetY);
+  if (width <= 0 || height <= 0) {
+    return {
+      width,
+      height,
+      left: 0,
+      top: 0,
+      right: 0,
+      bottom: 0
+    };
+  }
 
-  const clampedLeft = Math.max(0, Math.min(width, visibleLeft));
-  const clampedTop = Math.max(0, Math.min(height, visibleTop));
-  const clampedRight = Math.max(0, Math.min(width, visibleRight));
-  const clampedBottom = Math.max(0, Math.min(height, visibleBottom));
+  if (typeof DOMMatrixReadOnly === 'undefined' || typeof DOMPoint === 'undefined') {
+    const centerX = zoneWidth / 2;
+    const centerY = zoneHeight / 2;
+    const visibleLeft = ((((0 - liveImageTransform.x - centerX) / scale) + centerX) - offsetX);
+    const visibleTop = ((((0 - liveImageTransform.y - centerY) / scale) + centerY) - offsetY);
+    const visibleRight = ((((zoneWidth - liveImageTransform.x - centerX) / scale) + centerX) - offsetX);
+    const visibleBottom = ((((zoneHeight - liveImageTransform.y - centerY) / scale) + centerY) - offsetY);
+
+    return {
+      width,
+      height,
+      left: Math.max(0, Math.min(width, visibleLeft)),
+      top: Math.max(0, Math.min(height, visibleTop)),
+      right: Math.max(0, Math.min(width, visibleRight)),
+      bottom: Math.max(0, Math.min(height, visibleBottom))
+    };
+  }
+
+  const centerX = zoneWidth / 2;
+  const centerY = zoneHeight / 2;
+  const cssTransform = `translate(${liveImageTransform.x}px, ${liveImageTransform.y}px) scale(${scale})`;
+  const localTransform = new DOMMatrixReadOnly(cssTransform);
+  const fullTransform = new DOMMatrixReadOnly()
+    .translate(centerX, centerY)
+    .multiply(localTransform)
+    .translate(-centerX, -centerY);
+  const inverseTransform = fullTransform.inverse();
+  const zoneCorners = [
+    new DOMPoint(0, 0),
+    new DOMPoint(zoneWidth, 0),
+    new DOMPoint(zoneWidth, zoneHeight),
+    new DOMPoint(0, zoneHeight)
+  ].map((point) => point.matrixTransform(inverseTransform));
+
+  const localLeft = Math.min(...zoneCorners.map((point) => point.x));
+  const localTop = Math.min(...zoneCorners.map((point) => point.y));
+  const localRight = Math.max(...zoneCorners.map((point) => point.x));
+  const localBottom = Math.max(...zoneCorners.map((point) => point.y));
+
+  return {
+    width,
+    height,
+    left: Math.max(0, Math.min(width, localLeft - offsetX)),
+    top: Math.max(0, Math.min(height, localTop - offsetY)),
+    right: Math.max(0, Math.min(width, localRight - offsetX)),
+    bottom: Math.max(0, Math.min(height, localBottom - offsetY))
+  };
+};
+
+const minimapViewport = computed(() => {
+  const { width, height, left, top, right, bottom } = getBaseImageViewportBounds();
 
   const minimapScaleX = minimapSize.value.width / width;
   const minimapScaleY = minimapSize.value.height / height;
 
   return {
-    left: clampedLeft * minimapScaleX,
-    top: clampedTop * minimapScaleY,
-    width: Math.max(12, (clampedRight - clampedLeft) * minimapScaleX),
-    height: Math.max(12, (clampedBottom - clampedTop) * minimapScaleY)
+    left: left * minimapScaleX,
+    top: top * minimapScaleY,
+    width: (right - left) * minimapScaleX,
+    height: (bottom - top) * minimapScaleY
   };
 });
 
@@ -6894,7 +6949,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
   opacity: 0.92;
@@ -6902,6 +6957,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
 .image-minimap-viewport {
   position: absolute;
+  box-sizing: border-box;
   border: 2px solid rgba(66, 165, 245, 0.95);
   background: rgba(66, 165, 245, 0.16);
   box-shadow: 0 0 0 999px rgba(7, 10, 17, 0.18);
