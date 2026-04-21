@@ -2,13 +2,17 @@
 
 <script setup lang="ts">
 import { ref, computed, reactive, shallowRef, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { type CSSProperties } from 'vue';
+import { type ComponentPublicInstance, type CSSProperties } from 'vue';
 import { useDisplay, useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
 import { createEditorThemeDefinition, editorThemeFamilies, editorThemePresets } from '@/plugins/vuetify';
 import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useAnalytics } from '@/composables/useAnalytics';
 import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
+
+defineOptions({
+  name: 'ScreenshotMagicianEditor'
+});
 
 const chatlogText = ref('');
 const unsavedNavigationStore = useUnsavedNavigationStore();
@@ -123,6 +127,8 @@ interface EditorStateSnapshot {
   };
   stripTimestamps?: boolean;
   chatLineWidth: number;
+  chatTransform?: ChatTransform;
+  censoredRegions?: CensoredRegion[];
 }
 
 interface ProjectRecord {
@@ -253,6 +259,20 @@ interface SmartGuideLabel {
   y: number;
 }
 
+interface AxisSnap {
+  delta: number;
+  target: number;
+}
+
+interface SpacingSnap {
+  delta: number;
+  gap: number;
+  before: GuideBounds;
+  after: GuideBounds;
+}
+
+type TemplateRefElement = Element | ComponentPublicInstance | null;
+
 const DEFAULT_CHAT_LINE_WIDTH = 640;
 const HISTORY_LIMIT = 50;
 const HISTORY_COMMIT_DELAY_MS = 250;
@@ -304,6 +324,8 @@ const showTutorialDialog = ref(false);
 const showNavigator = ref(true);
 const smartGuidesEnabled = ref(true);
 const smartGuideStrength = ref(6);
+const isQBypassHeld = ref(false);
+const isGuideBypassActive = ref(false);
 const pendingProjectName = ref('');
 const pendingProjectDelete = ref<{ id: string; name: string } | null>(null);
 const isProjectsLoading = ref(false);
@@ -376,9 +398,6 @@ const calculateDropzoneScale = () => {
   // Get the available space in the content area (accounting for padding)
   const availableWidth = contentAreaRef.value.clientWidth - 24; // Adjust padding for better fit
   const availableHeight = contentAreaRef.value.clientHeight - 24;
-  
-  // Calculate the aspect ratio of the dropzone
-  const dropzoneRatio = dropZoneWidth.value / dropZoneHeight.value;
   
   // First check if the dropzone would fit at 100% scale
   if (dropZoneWidth.value <= availableWidth && dropZoneHeight.value <= availableHeight) {
@@ -1379,26 +1398,24 @@ const resolveThemeId = (themeId: string) => {
 
 const getThemeFamilyId = (themeId: string) => themeId.replace(/-(light|dark)$/, '');
 
-const getThemeVariant = (themeId: string) => themeId.endsWith('-dark') ? 'dark' : 'light';
-
 const createThemeDefinitionFromPalette = (palette: EditorThemePalette) =>
   createEditorThemeDefinition(palette);
 
 const getThemePaletteFromDefinition = (themeId: string): EditorThemePalette => {
-  const definition = vuetifyTheme.themes.value[themeId] || editorThemePresets.dark;
-  const colors = (definition as typeof editorThemePresets.dark).colors;
+  const definition = vuetifyTheme.themes.value[themeId] ?? editorThemePresets['default-dark'];
+  const colors = definition.colors ?? {};
 
   return {
-    background: colors.background,
-    surface: colors.surface,
-    surfaceVariant: colors['surface-variant'],
-    primary: colors.primary,
-    secondary: colors.secondary
+    background: colors.background ?? '#121313',
+    surface: colors.surface ?? '#1b1d1d',
+    surfaceVariant: colors['surface-variant'] ?? '#23272d',
+    primary: colors.primary ?? '#64b5f6',
+    secondary: colors.secondary ?? '#9575cd'
   };
 };
 
 const registerCustomEditorTheme = (themeConfig: SavedEditorTheme) => {
-  vuetifyTheme.themes.value[themeConfig.id] = createThemeDefinitionFromPalette(themeConfig.colors);
+  vuetifyTheme.themes.value[themeConfig.id] = createThemeDefinitionFromPalette(themeConfig.colors) as typeof vuetifyTheme.themes.value[string];
 };
 
 const saveCustomEditorThemes = () => {
@@ -1808,6 +1825,10 @@ const handleEditorHistoryKeydown = (event: KeyboardEvent) => {
   const key = event.key.toLowerCase();
   const isEditableTarget = isEditableEventTarget(event.target);
 
+  if (key === 'q') {
+    isQBypassHeld.value = true;
+  }
+
   if (!isEditableTarget && key === '?') {
     event.preventDefault();
     openKeyboardShortcuts();
@@ -1889,6 +1910,13 @@ const handleEditorHistoryKeydown = (event: KeyboardEvent) => {
   if (!handled) return;
 
   event.preventDefault();
+};
+
+const handleEditorHistoryKeyup = (event: KeyboardEvent) => {
+  if (event.key.toLowerCase() !== 'q') return;
+
+  isQBypassHeld.value = false;
+  isGuideBypassActive.value = false;
 };
 
 const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -2420,7 +2448,9 @@ const parseChatlog = () => {
       transform: createDefaultChatTransform(),
       censoredRegions: [],
       manualColorRegions: [],
-      lineWidth: chatLineWidth.value
+      lineWidth: chatLineWidth.value,
+      isHidden: false,
+      isLocked: false
     };
 
     chatOverlays.value.push(newOverlay);
@@ -2800,7 +2830,7 @@ const collectSmartGuideBounds = (
 const getBestAxisSnap = (
   movingPoints: number[],
   targets: number[]
-) => {
+): AxisSnap | null => {
   let bestDelta = Number.POSITIVE_INFINITY;
   let bestTarget: number | null = null;
 
@@ -2831,15 +2861,8 @@ const getSpacingSnap = (
   proposedBounds: GuideBounds,
   stationaryBounds: GuideBounds[],
   axis: 'horizontal' | 'vertical'
-) => {
-  let bestMatch:
-    | {
-        delta: number;
-        gap: number;
-        before: GuideBounds;
-        after: GuideBounds;
-      }
-    | null = null;
+): SpacingSnap | null => {
+  let bestMatch: SpacingSnap | null = null;
 
   stationaryBounds.forEach((before) => {
     stationaryBounds.forEach((after) => {
@@ -3011,7 +3034,7 @@ const applySmartGuides = (
   };
 };
 
-const setImageOverlayElement = (overlayId: string, element: Element | null) => {
+const setImageOverlayElement = (overlayId: string, element: TemplateRefElement) => {
   if (element instanceof HTMLElement) {
     imageOverlayElementMap.set(overlayId, element);
     return;
@@ -3020,7 +3043,7 @@ const setImageOverlayElement = (overlayId: string, element: Element | null) => {
   imageOverlayElementMap.delete(overlayId);
 };
 
-const setChatOverlayElement = (overlayId: string, element: Element | null) => {
+const setChatOverlayElement = (overlayId: string, element: TemplateRefElement) => {
   if (element instanceof HTMLElement) {
     chatOverlayElementMap.set(overlayId, element);
     return;
@@ -3155,7 +3178,7 @@ const handleImageMouseMove = (event: PointerEvent) => {
         'image',
         activeImageOverlay.value.id,
         getImageOverlayGuideBounds(activeImageOverlay.value, element, proposedX, proposedY),
-        false
+        isGuideBypassActive.value
       );
       pendingImageDragPosition.x = snappedPosition.x;
       pendingImageDragPosition.y = snappedPosition.y;
@@ -3342,7 +3365,7 @@ const handleChatMouseMove = (event: PointerEvent) => {
       'chat',
       activeChatOverlay.value.id,
       getChatOverlayGuideBounds(activeChatOverlay.value, element, proposedX, proposedY),
-      false
+      isGuideBypassActive.value
     );
     pendingChatDragPosition.x = snappedPosition.x;
     pendingChatDragPosition.y = snappedPosition.y;
@@ -3603,6 +3626,7 @@ const resetActiveImageOverlayView = () => {
 // Update chat overlay styles
 const getChatStyles = (overlay: ChatOverlay) => {
   const isActiveOverlay = activeChatOverlayId.value === overlay.id;
+  const overlayIndex = chatOverlays.value.findIndex((item) => item.id === overlay.id);
 
   return {
     position: 'absolute' as const,
@@ -3627,6 +3651,7 @@ const getChatStyles = (overlay: ChatOverlay) => {
         : 'pointer',
     outline: isActiveOverlay ? `1px dashed ${overlay.isLocked ? 'rgba(239, 83, 80, 0.9)' : 'rgba(66, 165, 245, 0.9)'}` : 'none',
     outlineOffset: '2px',
+    zIndex: 300 + Math.max(overlayIndex, 0)
   };
 };
 
@@ -4285,7 +4310,9 @@ const loadEditorState = () => {
           },
           censoredRegions: Array.isArray(state.censoredRegions) ? state.censoredRegions : [],
           manualColorRegions: [],
-          lineWidth: state.chatLineWidth || DEFAULT_CHAT_LINE_WIDTH
+          lineWidth: state.chatLineWidth || DEFAULT_CHAT_LINE_WIDTH,
+          isHidden: false,
+          isLocked: false
         };
 
         applyEditorSnapshot({
@@ -4430,6 +4457,7 @@ onMounted(() => {
   unsavedNavigationStore.setEditorMounted(true);
   window.addEventListener('beforeunload', handleBeforeUnload);
   window.addEventListener('keydown', handleEditorHistoryKeydown);
+  window.addEventListener('keyup', handleEditorHistoryKeyup);
   loadNavigatorPreference();
   loadSmartGuidePreferences();
   loadEditorThemes();
@@ -4473,6 +4501,7 @@ onUnmounted(() => {
   activeCanvasDragCleanup?.();
   window.removeEventListener('beforeunload', handleBeforeUnload);
   window.removeEventListener('keydown', handleEditorHistoryKeydown);
+  window.removeEventListener('keyup', handleEditorHistoryKeyup);
   if (windowResizeHandler) {
     window.removeEventListener('resize', windowResizeHandler);
   }
@@ -4611,7 +4640,7 @@ const saveAndContinuePendingAction = async () => {
   }
 
   pendingProjectName.value = currentProjectName.value;
-  await saveProject(false);
+  await saveProject();
 };
 
 const discardAndContinuePendingAction = async () => {
@@ -4771,7 +4800,7 @@ const confirmDeleteProject = async () => {
 };
 
 // Add this new method to handle the click on drop zone
-const handleDropZoneClick = (event: Event) => {
+const handleDropZoneClick = () => {
   if (!droppedImageSrc.value) {
     triggerFileInput();
   }

@@ -1,13 +1,49 @@
 // src/components/Footer.vue
-<script setup>
+<script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 
+defineOptions({
+    name: 'AppFooter'
+});
+
 const showChangelogDialog = ref(false);
-const version = 'v2.0.25-beta';
+const version = 'v2.0.27-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.27-beta',
+        date: 'APR-21-2026',
+        changes: [
+            {
+                type: 'improved',
+                items: [
+                    'Cleaned up the editor frontend so the current Vue, ESLint, and TypeScript Problems list is resolved again',
+                    'Improved component metadata and TypeScript typing across shared editor components for more reliable tooling and maintenance'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed smart-guide typing and legacy editor-state migration issues that were surfacing as build-time TypeScript errors',
+                    'Fixed template ref and saved-project typing edge cases so lint and type-check now pass cleanly'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.26-beta',
+        date: 'APR-21-2026',
+        changes: [
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed image effects such as Inverse affecting chat overlays on the live canvas preview by keeping chat layers above the image effect stack'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.25-beta',
         date: 'APR-21-2026',
@@ -532,7 +568,7 @@ const changelog = [
     }
 ];
 
-const getChangeTypeIcon = (type) => {
+const getChangeTypeIcon = (type: string) => {
     switch (type) {
         case 'new': return { icon: 'mdi-plus-circle', color: 'success', label: 'New Features' };
         case 'improved': return { icon: 'mdi-arrow-up-circle', color: 'info', label: 'Improvements' };

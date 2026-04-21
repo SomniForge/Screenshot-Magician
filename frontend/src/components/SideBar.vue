@@ -1,7 +1,11 @@
 // src/components/SideBar.vue
 
-<script setup>
+<script setup lang="ts">
 import { ref } from 'vue';
+
+defineOptions({
+  name: 'AppSideBar'
+});
 
 // Reactive variable to control the rail state
 // Start with the drawer collapsed (in rail mode)
