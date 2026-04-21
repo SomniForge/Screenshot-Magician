@@ -3,11 +3,38 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.23-beta';
+const version = 'v2.0.24-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.24-beta',
+        date: 'APR-21-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added two new image effects: Inverse for full color inversion and Darken for a moody finishing pass',
+                    'Added per-image-layer effect toggles so each overlay can either participate in image effects or stay clean above them'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved image-layer controls with hover tooltips for every compact action button in the left rail',
+                    'Improved the left utility rail so large image layer stacks scroll cleanly without pushing important controls off-screen',
+                    'Simplified the Inverse effect into a clean enabled-or-disabled toggle instead of an adjustable opacity effect'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed image effect preview and export mismatches so overlay layers now follow the same effect order in both places'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.23-beta',
         date: 'APR-21-2026',
