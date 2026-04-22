@@ -9,7 +9,7 @@
       <v-row justify="center">
         <v-col cols="12" md="10" lg="8">
           <h1 class="text-h3 mb-6 text-center">Terms of Use</h1>
-          <p class="text-subtitle-1 mb-6 text-center text-medium-emphasis">Last updated: April 2025</p>
+          <p class="text-subtitle-1 mb-6 text-center text-medium-emphasis">Last updated: April 22, 2026</p>
 
           <v-card class="mb-6 pa-4" variant="outlined">
             <div class="text-body-1">
@@ -22,7 +22,7 @@
               <h2 class="text-h5 mb-4">2. Description of Service</h2>
               <p class="mb-4">
                 Screenshot Magician is a web-based tool that allows users to edit and enhance screenshots with 
-                features including chat overlay, censoring, and image manipulation. The service is provided 
+                features including chat overlay, censoring, image manipulation, project persistence in the browser, and public aggregate usage counters. The service is provided 
                 "as is" and "as available" without any warranties.
               </p>
 
@@ -74,7 +74,7 @@
               <h2 class="text-h5 mb-4">6. User Content</h2>
               <p class="mb-4">
                 You retain all rights to any content you process through our service. We do not store or collect 
-                any images, chat logs, or other content you process. All processing occurs locally in your browser.
+                any images, chat logs, or other content you process on our backend. Image and chat processing occurs locally in your browser, although we may collect limited pseudonymous usage and telemetry data as described in our Privacy Policy.
               </p>
 
               <h2 class="text-h5 mb-4">7. Limitations of Liability</h2>
