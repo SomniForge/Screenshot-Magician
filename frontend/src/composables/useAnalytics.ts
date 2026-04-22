@@ -1,7 +1,7 @@
 import { event } from 'vue-gtag';
 
-type AnalyticsValue = string | number | boolean | null | undefined;
-type AnalyticsParams = Record<string, AnalyticsValue>;
+export type AnalyticsValue = string | number | boolean | null | undefined;
+export type AnalyticsParams = Record<string, AnalyticsValue>;
 
 const normalizeAnalyticsParams = (params?: AnalyticsParams) =>
   Object.fromEntries(

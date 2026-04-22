@@ -2,13 +2,55 @@
 
 <script setup lang="ts">
 import { ref, computed, reactive, shallowRef, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { type ComponentPublicInstance, type CSSProperties } from 'vue';
+import { type CSSProperties } from 'vue';
 import { useDisplay, useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
-import { createEditorThemeDefinition, editorThemeFamilies, editorThemePresets } from '@/plugins/vuetify';
 import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useAnalytics } from '@/composables/useAnalytics';
 import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
+import {
+  CensorType,
+  type ChatOverlay,
+  type ChatTransform,
+  type EditorHistoryEntry,
+  type EditorStateSnapshot,
+  type ImageEffectLayer,
+  type ImageEffectPreset,
+  type ImageEffectPreviewEntry,
+  type ImageOverlay,
+  type ImageOverlayTool,
+  type PendingEditorAction,
+  type PortableProjectFile,
+  type ProjectRecord,
+  type SwatchEntry
+} from '@/features/magician/types';
+import {
+  DEFAULT_CHAT_LINE_WIDTH,
+  DEFAULT_IMAGE_MASK_BRUSH_SIZE,
+  DEFAULT_IMAGE_MASK_BRUSH_SOFTNESS,
+  DEFAULT_IMAGE_MASK_BRUSH_STRENGTH,
+  DEFAULT_SELECTED_TEXT,
+  HISTORY_COMMIT_DELAY_MS,
+  HISTORY_LIMIT,
+  MAX_IMAGE_MASK_BRUSH_SIZE,
+  MIN_IMAGE_MASK_BRUSH_SIZE,
+  PROJECT_AUTOSAVE_DELAY_MS,
+  SHOW_NAVIGATOR_STORAGE_KEY,
+  SMART_GUIDES_ENABLED_STORAGE_KEY,
+  SMART_GUIDE_STRENGTH_STORAGE_KEY,
+  TUTORIAL_DISMISSED_COOKIE
+} from '@/features/magician/constants';
+import { tutorialSteps, shortcutGroups } from '@/features/magician/content';
+import { builtInThemeOptions } from '@/features/magician/themeConfig';
+import { IMAGE_EFFECT_PRESETS, imageEffectPresetMap } from '@/features/magician/imageEffects';
+import { colorMappings, formatSwatchLabel } from '@/features/magician/chatColors';
+import { loadStoredProject, saveStoredProject } from '@/features/magician/storage';
+import { getThemeFamilyId, useMagicianThemes } from '@/features/magician/useMagicianThemes';
+import { useMagicianProjects } from '@/features/magician/useMagicianProjects';
+import { useMagicianSessionPersistence } from '@/features/magician/useMagicianSessionPersistence';
+import { useMagicianChatLayers } from '@/features/magician/useMagicianChatLayers';
+import { useMagicianImageOverlayRuntime } from '@/features/magician/useMagicianImageOverlayRuntime';
+import { useMagicianCanvasInteraction } from '@/features/magician/useMagicianCanvasInteraction';
 
 defineOptions({
   name: 'ScreenshotMagicianEditor'
@@ -32,286 +74,8 @@ const chatPanelRef = ref<HTMLElement | null>(null);
 const parentRowRef = ref<HTMLElement | null>(null);
 const utilityPanelScrollRef = ref<HTMLElement | null>(null);
 const utilityPanelWidth = ref(352);
-const isResizingChatPanel = ref(false);
-const resizeStartX = ref(0);
-const initialChatPanelBasis = ref(25); // Default basis is 25%
 const chatPanelFlexBasis = ref('25%'); // Default width as string with %
 const mainContentFlexBasis = ref('75%'); // Default width for main content
-
-// --- Parsed Chat State ---
-interface ParsedLine {
-  id: number;
-  text: string;
-  color?: string;
-}
-
-interface ChatTransform {
-  x: number;
-  y: number;
-  scale: number;
-}
-
-interface ImageOverlay {
-  id: string;
-  name: string;
-  src: string;
-  sourceWidth: number;
-  sourceHeight: number;
-  maskDataUrl: string | null;
-  transform: ChatTransform;
-  opacity: number;
-  acceptsEffects: boolean;
-  isHidden: boolean;
-  isLocked: boolean;
-}
-
-// Censor types enum
-enum CensorType {
-  None = 'none',
-  Invisible = 'invisible',
-  BlackBar = 'blackbar',
-  Blur = 'blur'
-}
-
-// Interface for censored regions
-interface CensoredRegion {
-  lineIndex: number;
-  startOffset: number;
-  endOffset: number;
-  type: CensorType;
-}
-
-interface CensoredRegionSummary extends CensoredRegion {
-  id: string;
-  label: string;
-  preview: string;
-  lineText: string;
-}
-
-interface ManualColorRegion {
-  lineIndex: number;
-  startOffset: number;
-  endOffset: number;
-  color: string;
-}
-
-interface ChatOverlay {
-  id: string;
-  name: string;
-  rawText: string;
-  parsedLines: ParsedLine[];
-  transform: ChatTransform;
-  censoredRegions: CensoredRegion[];
-  manualColorRegions: ManualColorRegion[];
-  lineWidth: number;
-  isHidden: boolean;
-  isLocked: boolean;
-}
-
-interface EditorStateSnapshot {
-  characterName: string;
-  chatlogText: string;
-  droppedImageSrc: string | null;
-  dropZoneWidth: number;
-  dropZoneHeight: number;
-  imageTransform: ChatTransform;
-  imageOverlays: ImageOverlay[];
-  activeImageOverlayId: string | null;
-  imageEffects: ImageEffectLayer[];
-  chatOverlays: ChatOverlay[];
-  activeChatOverlayId: string | null;
-  isImageDraggingEnabled: boolean;
-  isChatDraggingEnabled: boolean;
-  showBlackBars: boolean;
-  selectedText: {
-    lineIndex: number;
-    startOffset: number;
-    endOffset: number;
-    text: string;
-  };
-  stripTimestamps?: boolean;
-  chatLineWidth: number;
-  chatTransform?: ChatTransform;
-  censoredRegions?: CensoredRegion[];
-}
-
-interface ProjectRecord {
-  id: string;
-  name: string;
-  createdAt: string;
-  updatedAt: string;
-  snapshot: EditorStateSnapshot;
-}
-
-interface SaveProjectOptions {
-  forceNewProject?: boolean;
-  autosave?: boolean;
-  refreshProjectList?: boolean;
-}
-
-interface PortableProjectFile {
-  format: 'ssmag-project';
-  version: 1;
-  exportedAt: string;
-  project: {
-    name: string;
-    createdAt: string;
-    updatedAt: string;
-    snapshot: EditorStateSnapshot;
-  };
-}
-
-interface PersistedEditorSession {
-  snapshot: EditorStateSnapshot;
-  currentProjectId: string | null;
-  currentProjectName: string;
-}
-
-interface ImageEffectLayer {
-  presetId: string;
-  opacity: number;
-  seed: number;
-  amount?: number;
-}
-
-interface ImageEffectPreset {
-  id: string;
-  name: string;
-  description: string;
-  blendMode: GlobalCompositeOperation;
-  defaultOpacity: number;
-  supportsSeed: boolean;
-  supportsOpacity?: boolean;
-  kind?: 'overlay' | 'scene';
-  supportsAmount?: boolean;
-  amountLabel?: string;
-  defaultAmount?: number;
-  amountMin?: number;
-  amountMax?: number;
-  amountStep?: number;
-}
-
-interface TutorialStep {
-  title: string;
-  icon: string;
-  description: string;
-}
-
-interface ShortcutGroup {
-  title: string;
-  items: Array<{
-    label: string;
-    keys: string[];
-  }>;
-}
-
-interface EditorThemePalette {
-  background: string;
-  surface: string;
-  surfaceVariant: string;
-  primary: string;
-  secondary: string;
-}
-
-interface SavedEditorTheme {
-  id: string;
-  name: string;
-  colors: EditorThemePalette;
-  createdAt: string;
-}
-
-interface BuiltInThemeOption {
-  id: string;
-  name: string;
-  description: string;
-  lightPreview: string[];
-  darkPreview: string[];
-}
-
-interface PendingEditorAction {
-  type: 'new-session' | 'load-project';
-  projectId?: string;
-}
-
-interface EditorHistoryEntry {
-  signature: string;
-  snapshot: EditorStateSnapshot;
-  currentProjectId: string | null;
-  currentProjectName: string;
-}
-
-interface ImageEffectPreviewEntry {
-  effect: ImageEffectLayer;
-  preset: ImageEffectPreset;
-  dataUrl: string;
-}
-
-interface GuideBounds {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-  centerX: number;
-  centerY: number;
-  width: number;
-  height: number;
-}
-
-interface SmartGuideLine {
-  kind: 'alignment' | 'spacing';
-  orientation: 'vertical' | 'horizontal';
-  position: number;
-  start: number;
-  end: number;
-}
-
-interface SmartGuideLabel {
-  text: string;
-  x: number;
-  y: number;
-}
-
-interface AxisSnap {
-  delta: number;
-  target: number;
-}
-
-interface SpacingSnap {
-  delta: number;
-  gap: number;
-  before: GuideBounds;
-  after: GuideBounds;
-}
-
-type ImageOverlayTool = 'move' | 'erase' | 'restore';
-
-type TemplateRefElement = Element | ComponentPublicInstance | null;
-
-const DEFAULT_CHAT_LINE_WIDTH = 640;
-const HISTORY_LIMIT = 50;
-const HISTORY_COMMIT_DELAY_MS = 250;
-const PROJECT_AUTOSAVE_DELAY_MS = 1200;
-const DEFAULT_IMAGE_MASK_BRUSH_SIZE = 180;
-const DEFAULT_IMAGE_MASK_BRUSH_SOFTNESS = 0.72;
-const DEFAULT_IMAGE_MASK_BRUSH_STRENGTH = 0.78;
-const MIN_IMAGE_MASK_BRUSH_SIZE = 8;
-const MAX_IMAGE_MASK_BRUSH_SIZE = 640;
-const DEFAULT_SELECTED_TEXT = {
-  lineIndex: -1,
-  startOffset: 0,
-  endOffset: 0,
-  text: ''
-};
-const PROJECTS_DB_NAME = 'screenshot-magician-projects';
-const PROJECTS_STORE_NAME = 'projects';
-const PROJECTS_DB_VERSION = 1;
-const TUTORIAL_DISMISSED_COOKIE = 'magicianTutorialDismissed';
-const CUSTOM_THEMES_STORAGE_KEY = 'magicianCustomThemes';
-const ACTIVE_THEME_STORAGE_KEY = 'magicianActiveTheme';
-const EDITOR_STATE_STORAGE_KEY = 'magicianEditorState';
-const SHOW_NAVIGATOR_STORAGE_KEY = 'magicianShowNavigator';
-const SMART_GUIDES_ENABLED_STORAGE_KEY = 'magicianSmartGuidesEnabled';
-const SMART_GUIDE_STRENGTH_STORAGE_KEY = 'magicianSmartGuideStrength';
 
 const chatOverlays = ref<ChatOverlay[]>([]);
 const activeChatOverlayId = ref<string | null>(null);
@@ -343,8 +107,6 @@ const showTutorialDialog = ref(false);
 const showNavigator = ref(true);
 const smartGuidesEnabled = ref(true);
 const smartGuideStrength = ref(6);
-const isQBypassHeld = ref(false);
-const isGuideBypassActive = ref(false);
 const pendingProjectName = ref('');
 const pendingProjectDelete = ref<{ id: string; name: string } | null>(null);
 const isProjectsLoading = ref(false);
@@ -354,19 +116,22 @@ const customColorSwatches = ref<string[]>([]);
 const imageEffects = ref<ImageEffectLayer[]>([]);
 const dontShowTutorialAgain = ref(false);
 const tutorialStepIndex = ref(0);
-const customEditorThemes = ref<SavedEditorTheme[]>([]);
-const themeDraftName = ref('');
-const themeSharePayload = ref('');
-const themeImportPayload = ref('');
-const activeEditorThemeId = ref('default-light');
-const themeDraftColors = reactive<EditorThemePalette>({
-  background: '#f4f5f7',
-  surface: '#ffffff',
-  surfaceVariant: '#edf1f5',
-  primary: '#42a5f5',
-  secondary: '#7e57c2'
-});
 const vuetifyTheme = useTheme();
+const {
+  activeEditorThemeId,
+  applyEditorTheme,
+  customEditorThemes,
+  deleteCustomEditorTheme,
+  exportActiveTheme,
+  importSharedTheme,
+  loadEditorThemes,
+  populateThemeDraftFromActiveTheme,
+  saveCustomEditorTheme,
+  themeDraftColors,
+  themeDraftName,
+  themeImportPayload,
+  themeSharePayload
+} = useMagicianThemes(vuetifyTheme);
 const { width: viewportWidth } = useDisplay();
 const { showAds, setShowAds } = useAdPreferences();
 const { trackEvent } = useAnalytics();
@@ -374,30 +139,20 @@ const isApplyingHistoryState = ref(false);
 let historyCommitTimer: ReturnType<typeof setTimeout> | null = null;
 let projectAutosaveTimer: ReturnType<typeof setTimeout> | null = null;
 let editorStatePersistTimer: ReturnType<typeof setTimeout> | null = null;
+let applyHistoryStateTimer: ReturnType<typeof setTimeout> | null = null;
 let dropzoneScaleAnimationFrame: number | null = null;
 let windowResizeHandler: (() => void) | null = null;
-const imageOverlaySourceImageCache = new Map<string, HTMLImageElement>();
-const imageOverlaySourceImageLoadCache = new Map<string, Promise<HTMLImageElement>>();
-const imageOverlayMaskCanvasMap = new Map<string, HTMLCanvasElement>();
-const imageOverlayMaskSerializeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // --- Image Manipulation State ---
 const isImageDraggingEnabled = ref(false);
 const imageTransform = reactive({ x: 0, y: 0, scale: 1 });
-const isPanning = ref(false);
-const panStart = reactive({ x: 0, y: 0 });
-const panStartImagePos = reactive({ x: 0, y: 0 });
 const activeImageDragTarget = ref<'base' | 'overlay'>('base');
-const imageOverlayElementMap = new Map<string, HTMLElement>();
-const pendingImageDragPosition = reactive({ x: 0, y: 0 });
-let imageDragAnimationFrame: number | null = null;
 const imageOverlayTool = ref<ImageOverlayTool>('move');
 const imageMaskBrushSize = ref(DEFAULT_IMAGE_MASK_BRUSH_SIZE);
 const imageMaskBrushSoftness = ref(DEFAULT_IMAGE_MASK_BRUSH_SOFTNESS);
 const imageMaskBrushStrength = ref(DEFAULT_IMAGE_MASK_BRUSH_STRENGTH);
 const isImageMaskPainting = ref(false);
 const activeImageMaskOverlayId = ref<string | null>(null);
-const imageMaskPaintLastPoint = reactive({ x: 0, y: 0 });
 const imageMaskBrushPreview = reactive({
   visible: false,
   x: 0,
@@ -407,15 +162,6 @@ const imageMaskBrushPreview = reactive({
 
 // --- Chat Manipulation State ---
 const isChatDraggingEnabled = ref(false);
-const isChatPanning = ref(false);
-const chatPanStart = reactive({ x: 0, y: 0 });
-const chatPanStartPos = reactive({ x: 0, y: 0 });
-const chatOverlayElementMap = new Map<string, HTMLElement>();
-const pendingChatDragPosition = reactive({ x: 0, y: 0 });
-let chatDragAnimationFrame: number | null = null;
-const smartGuideLines = ref<SmartGuideLine[]>([]);
-const smartGuideLabels = ref<SmartGuideLabel[]>([]);
-let activeCanvasDragCleanup: (() => void) | null = null;
 
 // --- Scale Adjustment for Drop Zone Visibility ---
 const contentAreaRef = ref<HTMLElement | null>(null); // Reference to content area div
@@ -508,182 +254,6 @@ const scaleIndicator = computed(() => {
   return `${scale}%`;
 });
 
-// Color mapping interface
-interface ColorMapping {
-  pattern: RegExp;
-  color: string;
-  splitPattern?: RegExp;
-  markerColor?: string;
-  fullLine?: boolean;
-  checkPlayerName?: boolean;  // New flag
-}
-
-interface SwatchEntry {
-  color: string;
-  label: string;
-}
-
-const tutorialSteps: TutorialStep[] = [
-  {
-    title: 'Start With A Screenshot',
-    icon: 'mdi-image-plus-outline',
-    description: 'Drop or click to load your screenshot into the canvas. Then add as many extra image layers as you want for props, logos, cutouts, or decals.'
-  },
-  {
-    title: 'Add Chat Layers',
-    icon: 'mdi-message-plus-outline',
-    description: 'Paste or import a chatlog, then hit Parse to turn it into a movable chat layer. You can create and stack multiple chat layers.'
-  },
-  {
-    title: 'Position And Style',
-    icon: 'mdi-cursor-move',
-    description: 'Use the drag controls to move or zoom the screenshot and chats. Select text in the chat editor to apply censoring or color overrides.'
-  },
-  {
-    title: 'Polish With Effects',
-    icon: 'mdi-image-filter-center-focus',
-    description: 'Open Effects to add film grain, vignette, scanlines, and other finishing layers on top of the image for extra mood.'
-  },
-  {
-    title: 'Save Your Work',
-    icon: 'mdi-content-save-outline',
-    description: 'Use Save Project to keep your session locally, or Save Image to export the final screenshot when everything looks right.'
-  }
-];
-
-const shortcutGroups: ShortcutGroup[] = [
-  {
-    title: 'Project',
-    items: [
-      { label: 'Open keyboard shortcuts', keys: ['?'] },
-      { label: 'Save project', keys: ['Ctrl', 'S'] },
-      { label: 'Undo', keys: ['Ctrl', 'Z'] },
-      { label: 'Redo', keys: ['Ctrl', 'Y'] },
-      { label: 'Redo alternative', keys: ['Ctrl', 'Shift', 'Z'] }
-    ]
-  },
-  {
-    title: 'Canvas',
-    items: [
-      { label: 'Nudge active image layer', keys: ['Arrow Keys'] },
-      { label: 'Large nudge active image layer', keys: ['Shift', 'Arrow Keys'] },
-      { label: 'Zoom active image layer', keys: ['+', '/ -'] }
-    ]
-  },
-  {
-    title: 'Chat Layer',
-    items: [
-      { label: 'Update or create selected chat', keys: ['Ctrl', 'Enter'] },
-      { label: 'Nudge active chat layer', keys: ['Arrow Keys'] },
-      { label: 'Large nudge active chat layer', keys: ['Shift', 'Arrow Keys'] },
-      { label: 'Zoom active chat layer', keys: ['+', '/ -'] },
-      { label: 'Clear selected censor or color formatting', keys: ['Delete'] }
-    ]
-  },
-  {
-    title: 'Guides',
-    items: [
-      { label: 'Snap to canvas and layer alignment guides', keys: ['Drag'] },
-      { label: 'Show equal spacing guides between nearby objects', keys: ['Drag'] }
-    ]
-  }
-];
-
-const builtInThemeDescriptions: Record<string, string> = {
-  default: 'The familiar Screenshot Magician look, now with a dark companion.',
-  steel: 'Cool blue-gray tones with a crisp studio feel.',
-  ember: 'Warm editorial tones with orange highlights.',
-  aurora: 'Sharper neon accents for a vivid control room vibe.',
-  dracula: 'Moody purple-forward contrast inspired by the Dracula palette.',
-  solarized: 'Balanced classic tones inspired by Solarized light and dark.',
-  nord: 'Muted arctic colors with a calm, technical feel.'
-};
-
-const builtInThemeOptions: BuiltInThemeOption[] = Object.entries(editorThemeFamilies).map(([familyId, family]) => ({
-  id: familyId,
-  name: family.name,
-  description: builtInThemeDescriptions[familyId] || `${family.name} in light and dark variants.`,
-  lightPreview: [family.light.background, family.light.surface, family.light.primary, family.light.secondary],
-  darkPreview: [family.dark.background, family.dark.surface, family.dark.primary, family.dark.secondary]
-}));
-
-const IMAGE_EFFECT_PRESETS: ImageEffectPreset[] = [
-  {
-    id: 'film-grain',
-    name: 'Film Grain',
-    description: 'Adds fine monochrome grain for a gritty, cinematic finish.',
-    blendMode: 'overlay',
-    defaultOpacity: 0.32,
-    supportsSeed: true
-  },
-  {
-    id: 'inverse',
-    name: 'Inverse',
-    description: 'Inverts the screenshot colors so dark tones become light and vice versa.',
-    blendMode: 'difference',
-    defaultOpacity: 1,
-    supportsSeed: false,
-    supportsOpacity: false
-  },
-  {
-    id: 'darken',
-    name: 'Darken',
-    description: 'Pushes a smoky dark wash over the frame without crushing every highlight.',
-    blendMode: 'darken',
-    defaultOpacity: 0.42,
-    supportsSeed: true
-  },
-  {
-    id: 'dust-scratches',
-    name: 'Dust & Scratches',
-    description: 'Layers specks and hairline scratches for an aged-photo look.',
-    blendMode: 'screen',
-    defaultOpacity: 0.24,
-    supportsSeed: true
-  },
-  {
-    id: 'vignette',
-    name: 'Vignette',
-    description: 'Darkens the edges to push attention toward the center.',
-    blendMode: 'multiply',
-    defaultOpacity: 0.48,
-    supportsSeed: false
-  },
-  {
-    id: 'scanlines',
-    name: 'Scanlines',
-    description: 'Adds subtle horizontal lines for a harsh broadcast feel.',
-    blendMode: 'multiply',
-    defaultOpacity: 0.22,
-    supportsSeed: false
-  },
-  {
-    id: 'vhs',
-    name: 'VHS',
-    description: 'Adds tracking noise, chroma drift, scanlines, and tape grime for a lo-fi cassette look.',
-    blendMode: 'overlay',
-    defaultOpacity: 0.42,
-    supportsSeed: true
-  },
-  {
-    id: 'cctv',
-    name: 'CCTV',
-    description: 'Pushes the frame into high-contrast surveillance monochrome with scanlines, noise, and adjustable lens curvature.',
-    blendMode: 'source-over',
-    defaultOpacity: 1,
-    supportsSeed: true,
-    kind: 'scene',
-    supportsAmount: true,
-    amountLabel: 'Lens Curve',
-    defaultAmount: 0.34,
-    amountMin: 0,
-    amountMax: 1,
-    amountStep: 0.01
-  }
-];
-
-const imageEffectPresetMap = new Map(IMAGE_EFFECT_PRESETS.map((preset) => [preset.id, preset]));
-
 // Replace first/last name with single character name
 const characterName = ref('');
 
@@ -693,102 +263,6 @@ watch(characterName, (newValue) => {
 });
 
 // Update color mappings to handle all GTA World patterns
-const colorMappings: ColorMapping[] = [
-  // Radio messages - top priority
-  { 
-    pattern: /^\*\* \[S: .+? \| CH: .+?\]/i, 
-    color: 'rgb(214, 207, 140)',
-    fullLine: true
-  },
-  
-  // Add cellphone pattern with higher priority
-  { 
-    pattern: /\(cellphone\)/i,
-    color: 'rgb(251, 247, 36)',
-    fullLine: true,
-    checkPlayerName: true  // New flag to check if it's the player's message
-  },
-  
-  // Basic chat patterns
-  { pattern: /says:|shouts:/i, color: 'rgb(241, 241, 241)' },
-  { pattern: /\(Car\)/i, color: 'rgb(251, 247, 36)' },
-  { pattern: /^\*/, color: 'rgb(194, 163, 218)' },
-  { pattern: /\bwhispers\b/i, color: 'rgb(237, 168, 65)' },
-  { pattern: /\bYou paid\b|\bpaid you\b|\byou gave\b|\bgave you\b|\bYou received\b/i, color: 'rgb(86, 214, 75)' },
-  { pattern: /g\)/i, color: 'rgb(255, 255, 0)' },
-  { pattern: /\[low\]:|\[lower\]:/i, color: 'rgb(150, 149, 149)' },
-
-  // New patterns from the provided code
-  { 
-    pattern: /\[!]/, 
-    color: 'rgb(255, 255, 255)', 
-    splitPattern: /(\[!])/, 
-    markerColor: 'rgb(255, 0, 195)'
-  },
-  { pattern: /\[INFO]:/, color: 'rgb(255, 255, 255)', splitPattern: /(\[INFO]:)/, markerColor: 'rgb(27, 124, 222)' },
-  { pattern: /\[ALERT]/, color: 'rgb(255, 255, 255)', splitPattern: /(\[ALERT])/, markerColor: 'rgb(27, 124, 222)' },
-  { pattern: /\[GYM]/, color: 'rgb(255, 255, 255)', splitPattern: /(\[GYM])/, markerColor: 'rgb(22, 106, 189)' },
-  { pattern: /\[advertisement]/i, color: 'rgb(127, 239, 43)' },
-  { pattern: /\(\( \(PM/i, color: 'rgb(239, 227, 0)' },
-  { pattern: /\(\( \(/i, color: 'rgb(139, 138, 138)' },
-  { pattern: /\[megaphone]/i, color: 'rgb(241, 213, 3)' },
-  { pattern: /\[microphone]/i, color: 'rgb(246, 218, 3)' },
-  { pattern: /\[intercom]/i, color: 'rgb(26, 131, 232)' },
-  
-  // Character kill pattern
-  { pattern: /\[Character kill]/, color: 'rgb(240, 0, 0)', splitPattern: /(\[Character kill])/, markerColor: 'rgb(56, 150, 243)' },
-  
-  // Money patterns
-  { 
-    pattern: /\[\$.*g\)/, 
-    color: 'rgb(255, 255, 0)',
-    splitPattern: /(\[\$[^\]]*\])/,
-    markerColor: 'rgb(86, 214, 75)'
-  },
-  { 
-    pattern: /\(\$.*g\)/, 
-    color: 'rgb(255, 255, 0)',
-    splitPattern: /(\(\$[^\)]*\))/,
-    markerColor: 'rgb(86, 214, 75)'
-  },
-  
-  // Phone number pattern
-  { 
-    pattern: / PH: .*g\)/, 
-    color: 'rgb(255, 255, 0)',
-    splitPattern: /( PH: .*)/,
-    markerColor: 'rgb(86, 214, 75)'
-  }
-];
-
-const defaultSwatchUsageMap = new Map<string, string[]>([
-  ['rgb(255, 255, 255)', ['Standard chat text', 'Info and alert body text']],
-  ['rgb(0, 0, 0)', ['Black bars and dark masking accents']],
-  ['rgb(214, 207, 140)', ['Radio messages']],
-  ['rgb(251, 247, 36)', ['Cellphone text', 'Car chat', 'Government chat / g)']],
-  ['rgb(241, 241, 241)', ['Normal speech and shouting']],
-  ['rgb(194, 163, 218)', ['Roleplay action lines']],
-  ['rgb(237, 168, 65)', ['Whispers']],
-  ['rgb(86, 214, 75)', ['Money received / paid', 'Payment and phone markers']],
-  ['rgb(150, 149, 149)', ['Low or lower chat']],
-  ['rgb(255, 0, 195)', ['[!] markers']],
-  ['rgb(27, 124, 222)', ['[INFO] and [ALERT] markers']],
-  ['rgb(22, 106, 189)', ['[GYM] markers']],
-  ['rgb(127, 239, 43)', ['Advertisements']],
-  ['rgb(239, 227, 0)', ['Private messages']],
-  ['rgb(139, 138, 138)', ['Out of character chat']],
-  ['rgb(241, 213, 3)', ['Megaphone']],
-  ['rgb(246, 218, 3)', ['Microphone']],
-  ['rgb(26, 131, 232)', ['Intercom']],
-  ['rgb(240, 0, 0)', ['Character kill text']],
-  ['rgb(56, 150, 243)', ['Character kill marker']]
-]);
-
-const formatSwatchLabel = (color: string, fallbackLabel = 'Custom swatch') => {
-  const uses = defaultSwatchUsageMap.get(color);
-  return uses && uses.length > 0 ? uses.join(' / ') : `${fallbackLabel} (${color})`;
-};
-
 const defaultColorSwatches = computed<SwatchEntry[]>(() => {
   const swatches = new Set<string>([
     'rgb(255, 255, 255)',
@@ -826,280 +300,6 @@ const loadCustomColorSwatches = () => {
   }
 };
 
-const loadHtmlImage = (src: string) =>
-  new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error(`Failed to load image: ${src.slice(0, 64)}`));
-    image.src = src;
-  });
-
-const loadOverlaySourceImage = (src: string) => {
-  const cachedImage = imageOverlaySourceImageCache.get(src);
-  if (cachedImage) {
-    return Promise.resolve(cachedImage);
-  }
-
-  const inflightRequest = imageOverlaySourceImageLoadCache.get(src);
-  if (inflightRequest) {
-    return inflightRequest;
-  }
-
-  const request = loadHtmlImage(src)
-    .then((image) => {
-      imageOverlaySourceImageCache.set(src, image);
-      imageOverlaySourceImageLoadCache.delete(src);
-      return image;
-    })
-    .catch((error) => {
-      imageOverlaySourceImageLoadCache.delete(src);
-      throw error;
-    });
-
-  imageOverlaySourceImageLoadCache.set(src, request);
-  return request;
-};
-
-const hideImageMaskBrushPreview = () => {
-  imageMaskBrushPreview.visible = false;
-};
-
-const resolveTemplateElement = (target: TemplateRefElement | HTMLElement | null) => {
-  if (target instanceof HTMLElement) {
-    return target;
-  }
-
-  if (target && '$el' in target) {
-    const rootElement = target.$el;
-    return rootElement instanceof HTMLElement ? rootElement : null;
-  }
-
-  return null;
-};
-
-const syncImageOverlayIntrinsicSize = (overlay: ImageOverlay, width: number, height: number) => {
-  const safeWidth = Math.max(1, Math.round(width));
-  const safeHeight = Math.max(1, Math.round(height));
-
-  if (overlay.sourceWidth === safeWidth && overlay.sourceHeight === safeHeight) {
-    return;
-  }
-
-  overlay.sourceWidth = safeWidth;
-  overlay.sourceHeight = safeHeight;
-};
-
-const createImageOverlayMaskCanvas = (width: number, height: number) => {
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(width));
-  canvas.height = Math.max(1, Math.round(height));
-  const ctx = canvas.getContext('2d');
-  if (ctx) {
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }
-  return canvas;
-};
-
-const ensureImageOverlayMaskCanvas = (overlay: ImageOverlay, fallbackWidth?: number, fallbackHeight?: number) => {
-  const width = overlay.sourceWidth || fallbackWidth || 1;
-  const height = overlay.sourceHeight || fallbackHeight || 1;
-  const existingCanvas = imageOverlayMaskCanvasMap.get(overlay.id);
-
-  if (existingCanvas && existingCanvas.width === width && existingCanvas.height === height) {
-    return existingCanvas;
-  }
-
-  const maskCanvas = createImageOverlayMaskCanvas(width, height);
-  imageOverlayMaskCanvasMap.set(overlay.id, maskCanvas);
-  return maskCanvas;
-};
-
-const hydrateImageOverlayMaskCanvas = async (overlay: ImageOverlay) => {
-  if (!overlay.maskDataUrl) {
-    return null;
-  }
-
-  const maskCanvas = ensureImageOverlayMaskCanvas(overlay);
-  const ctx = maskCanvas.getContext('2d');
-  if (!ctx) {
-    return null;
-  }
-
-  ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
-
-  try {
-    const maskImage = await loadHtmlImage(overlay.maskDataUrl);
-    ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-    ctx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height);
-    return maskCanvas;
-  } catch (error) {
-    console.error('Error hydrating image overlay mask:', error);
-    return null;
-  }
-};
-
-const renderImageOverlayCanvas = async (overlayId: string) => {
-  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  const element = imageOverlayElementMap.get(overlayId);
-  if (!overlay || !(element instanceof HTMLCanvasElement)) {
-    return;
-  }
-
-  try {
-    const sourceImage = await loadOverlaySourceImage(overlay.src);
-    syncImageOverlayIntrinsicSize(overlay, sourceImage.naturalWidth, sourceImage.naturalHeight);
-
-    if (element.width !== overlay.sourceWidth || element.height !== overlay.sourceHeight) {
-      element.width = overlay.sourceWidth;
-      element.height = overlay.sourceHeight;
-    }
-
-    const ctx = element.getContext('2d');
-    if (!ctx) {
-      return;
-    }
-
-    ctx.clearRect(0, 0, element.width, element.height);
-    ctx.drawImage(sourceImage, 0, 0, element.width, element.height);
-
-    const maskCanvas = imageOverlayMaskCanvasMap.get(overlay.id)
-      ?? (overlay.maskDataUrl ? await hydrateImageOverlayMaskCanvas(overlay) : null);
-
-    if (maskCanvas) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'destination-in';
-      ctx.drawImage(maskCanvas, 0, 0, element.width, element.height);
-      ctx.restore();
-    }
-  } catch (error) {
-    console.error('Error rendering image overlay canvas:', error);
-  }
-};
-
-const renderImageOverlayCanvasImmediate = (
-  overlay: ImageOverlay,
-  element: HTMLCanvasElement,
-  sourceImage: HTMLImageElement,
-  maskCanvas: HTMLCanvasElement | null
-) => {
-  syncImageOverlayIntrinsicSize(overlay, sourceImage.naturalWidth, sourceImage.naturalHeight);
-
-  if (element.width !== overlay.sourceWidth || element.height !== overlay.sourceHeight) {
-    element.width = overlay.sourceWidth;
-    element.height = overlay.sourceHeight;
-  }
-
-  const ctx = element.getContext('2d');
-  if (!ctx) {
-    return;
-  }
-
-  ctx.clearRect(0, 0, element.width, element.height);
-  ctx.drawImage(sourceImage, 0, 0, element.width, element.height);
-
-  if (maskCanvas) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'destination-in';
-    ctx.drawImage(maskCanvas, 0, 0, element.width, element.height);
-    ctx.restore();
-  }
-};
-
-const renderAllImageOverlayCanvases = () => {
-  imageOverlays.value.forEach((overlay) => {
-    void renderImageOverlayCanvas(overlay.id);
-  });
-};
-
-const serializeImageOverlayMask = (overlayId: string) => {
-  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  const maskCanvas = imageOverlayMaskCanvasMap.get(overlayId);
-  if (!overlay || !maskCanvas) {
-    return;
-  }
-
-  overlay.maskDataUrl = maskCanvas.toDataURL('image/png');
-};
-
-const scheduleImageOverlayMaskSerialization = (overlayId: string, immediate = false) => {
-  const existingTimer = imageOverlayMaskSerializeTimers.get(overlayId);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-    imageOverlayMaskSerializeTimers.delete(overlayId);
-  }
-
-  if (immediate) {
-    serializeImageOverlayMask(overlayId);
-    return;
-  }
-
-  const timer = setTimeout(() => {
-    imageOverlayMaskSerializeTimers.delete(overlayId);
-    serializeImageOverlayMask(overlayId);
-  }, 350);
-
-  imageOverlayMaskSerializeTimers.set(overlayId, timer);
-};
-
-const clearImageOverlayMaskRuntimeState = (overlayId: string) => {
-  const serializeTimer = imageOverlayMaskSerializeTimers.get(overlayId);
-  if (serializeTimer) {
-    clearTimeout(serializeTimer);
-    imageOverlayMaskSerializeTimers.delete(overlayId);
-  }
-
-  imageOverlayMaskCanvasMap.delete(overlayId);
-};
-
-const clearImageOverlayRuntimeState = (overlayId: string) => {
-  clearImageOverlayMaskRuntimeState(overlayId);
-  imageOverlayElementMap.delete(overlayId);
-};
-
-const syncImageOverlayRuntimeState = () => {
-  const liveOverlayIds = new Set(imageOverlays.value.map((overlay) => overlay.id));
-
-  Array.from(imageOverlayMaskCanvasMap.keys()).forEach((overlayId) => {
-    if (!liveOverlayIds.has(overlayId)) {
-      clearImageOverlayRuntimeState(overlayId);
-    }
-  });
-
-  Array.from(imageOverlayMaskSerializeTimers.keys()).forEach((overlayId) => {
-    if (!liveOverlayIds.has(overlayId)) {
-      clearImageOverlayRuntimeState(overlayId);
-    }
-  });
-};
-
-const getImageOverlayCanvasPoint = (element: HTMLCanvasElement, clientX: number, clientY: number) => {
-  const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) {
-    return null;
-  }
-
-  const x = ((clientX - rect.left) / rect.width) * element.width;
-  const y = ((clientY - rect.top) / rect.height) * element.height;
-
-  if (x < 0 || y < 0 || x > element.width || y > element.height) {
-    return null;
-  }
-
-  const dropZoneElement = resolveTemplateElement(dropZoneRef.value);
-  const dropRect = dropZoneElement?.getBoundingClientRect();
-  const interactionScale = getCanvasInteractionScale();
-
-  return {
-    x,
-    y,
-    zoneX: dropRect ? (clientX - dropRect.left) / interactionScale : 0,
-    zoneY: dropRect ? (clientY - dropRect.top) / interactionScale : 0
-  };
-};
-
 const handleImageLayerRailWheel = (event: WheelEvent) => {
   const utilityScrollElement = utilityPanelScrollRef.value;
   if (!utilityScrollElement) {
@@ -1117,87 +317,6 @@ const handleImageLayerRailWheel = (event: WheelEvent) => {
   event.preventDefault();
   event.stopPropagation();
   utilityScrollElement.scrollTop += deltaY;
-};
-
-const updateImageMaskBrushPreview = (overlay: ImageOverlay, zoneX: number, zoneY: number) => {
-  imageMaskBrushPreview.visible = true;
-  imageMaskBrushPreview.x = zoneX;
-  imageMaskBrushPreview.y = zoneY;
-  imageMaskBrushPreview.diameter = imageMaskBrushSize.value * overlay.transform.scale;
-};
-
-const stampImageOverlayMaskBrush = (
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  radius: number,
-  softness: number,
-  strength: number,
-  tool: Exclude<ImageOverlayTool, 'move'>
-) => {
-  const innerRadius = radius * (1 - clampImageMaskBrushSoftness(softness));
-  const gradient = ctx.createRadialGradient(x, y, innerRadius, x, y, radius);
-  gradient.addColorStop(0, `rgba(255, 255, 255, ${clampImageMaskBrushStrength(strength)})`);
-  gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
-  ctx.save();
-  ctx.globalCompositeOperation = tool === 'erase' ? 'destination-out' : 'source-over';
-  ctx.fillStyle = gradient;
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-};
-
-const paintImageOverlayMaskSegment = (
-  overlay: ImageOverlay,
-  maskCanvas: HTMLCanvasElement,
-  fromX: number,
-  fromY: number,
-  toX: number,
-  toY: number
-) => {
-  const ctx = maskCanvas.getContext('2d');
-  if (!ctx || imageOverlayTool.value === 'move') {
-    return;
-  }
-
-  const radius = Math.max(1, imageMaskBrushSize.value / 2);
-  const distance = Math.hypot(toX - fromX, toY - fromY);
-  const step = Math.max(1, radius * 0.35);
-  const stampCount = Math.max(1, Math.ceil(distance / step));
-
-  for (let index = 0; index <= stampCount; index += 1) {
-    const progress = stampCount === 0 ? 1 : index / stampCount;
-    stampImageOverlayMaskBrush(
-      ctx,
-      fromX + ((toX - fromX) * progress),
-      fromY + ((toY - fromY) * progress),
-      radius,
-      imageMaskBrushSoftness.value,
-      imageMaskBrushStrength.value,
-      imageOverlayTool.value
-    );
-  }
-
-  const element = imageOverlayElementMap.get(overlay.id);
-  const sourceImage = imageOverlaySourceImageCache.get(overlay.src);
-  if (element instanceof HTMLCanvasElement && sourceImage) {
-    renderImageOverlayCanvasImmediate(overlay, element, sourceImage, maskCanvas);
-  } else {
-    void renderImageOverlayCanvas(overlay.id);
-  }
-  scheduleImageOverlayMaskSerialization(overlay.id);
-};
-
-const finishImageOverlayMaskPainting = () => {
-  if (activeImageMaskOverlayId.value) {
-    scheduleImageOverlayMaskSerialization(activeImageMaskOverlayId.value, true);
-  }
-
-  isImageMaskPainting.value = false;
-  activeImageMaskOverlayId.value = null;
-  hideImageMaskBrushPreview();
 };
 
 // Computed style for the drop zone
@@ -1515,6 +634,104 @@ const clampImageMaskBrushSoftness = (softness: number) =>
 
 const clampImageMaskBrushStrength = (strength: number) =>
   Math.min(1, Math.max(0.05, strength));
+
+const {
+  buildMaskedImageOverlayCanvas,
+  clearImageOverlayMaskRuntimeState,
+  clearImageOverlayRuntimeState,
+  disposeImageOverlayRuntime,
+  ensureImageOverlayMaskCanvas,
+  finishImageOverlayMaskPainting,
+  getImageOverlayCanvasPoint,
+  hideImageMaskBrushPreview,
+  imageOverlayElementMap,
+  imageOverlayMaskCanvasMap,
+  loadOverlaySourceImage,
+  paintImageOverlayMaskSegment,
+  renderAllImageOverlayCanvases,
+  renderImageOverlayCanvas,
+  setImageOverlayElement,
+  syncImageOverlayRuntimeState,
+  updateImageMaskBrushPreview
+} = useMagicianImageOverlayRuntime({
+  activeImageMaskOverlayId,
+  clampImageMaskBrushSoftness,
+  clampImageMaskBrushStrength,
+  dropZoneRef,
+  getCanvasInteractionScale: () => getCanvasInteractionScale(),
+  imageMaskBrushPreview,
+  imageMaskBrushSize,
+  imageMaskBrushSoftness,
+  imageMaskBrushStrength,
+  imageOverlayTool,
+  imageOverlays,
+  isImageMaskPainting
+});
+
+const {
+  clearSmartGuides,
+  disposeCanvasInteraction,
+  enableChatDragFromCanvas,
+  enableImageDragFromCanvas,
+  enableImageOverlayDragFromCanvas,
+  handleChatMouseDown,
+  handleChatMouseUpOrLeave,
+  handleChatWheel,
+  handleImageMouseDown,
+  handleImageMouseUpOrLeave,
+  handleImageOverlayMouseDown,
+  handleImageOverlayPointerLeave,
+  handleImageOverlayPointerMove,
+  handleImageOverlayWheel,
+  handleResizeMouseDown,
+  handleWheel,
+  isChatPanning,
+  isGuideBypassActive,
+  isPanning,
+  isQBypassHeld,
+  pendingImageDragPosition,
+  setChatOverlayElement,
+  smartGuideLabels,
+  smartGuideLines,
+  toggleChatDrag,
+  toggleImageDrag
+} = useMagicianCanvasInteraction({
+  activeChatOverlay,
+  activeChatOverlayId,
+  activeImageDragTarget,
+  activeImageMaskOverlayId,
+  activeImageOverlay,
+  activeImageOverlayId,
+  chatOverlays,
+  chatPanelFlexBasis,
+  clampImageMaskBrushSize,
+  dropZoneHeight,
+  dropZoneWidth,
+  droppedImageSrc,
+  ensureImageOverlayMaskCanvas,
+  finishImageOverlayMaskPainting,
+  getCanvasInteractionScale: () => getCanvasInteractionScale(),
+  getImageOverlayCanvasPoint,
+  hideImageMaskBrushPreview,
+  imageElementRef,
+  imageMaskBrushSize,
+  imageOverlays,
+  imageOverlayElementMap,
+  imageOverlayTool,
+  imageTransform,
+  isChatDraggingEnabled,
+  isImageDraggingEnabled,
+  isImageMaskPainting,
+  isImageOverlayBrushActive,
+  mainContentFlexBasis,
+  paintImageOverlayMaskSegment,
+  parentRowRef,
+  selectChatOverlay: (overlayId: string) => selectChatOverlay(overlayId),
+  selectImageOverlay,
+  smartGuidesEnabled,
+  smartGuideStrength,
+  updateImageMaskBrushPreview
+});
 
 const setImageOverlayTool = (tool: ImageOverlayTool) => {
   imageOverlayTool.value = tool;
@@ -2014,7 +1231,7 @@ const buildAffectedSceneCanvas = async () => {
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
 
-  const baseImage = await loadHtmlImage(droppedImageSrc.value);
+  const baseImage = await loadOverlaySourceImage(droppedImageSrc.value);
   const viewportRatio = width / height;
   const imageRatio = baseImage.naturalWidth / baseImage.naturalHeight;
   let drawWidth: number;
@@ -2221,181 +1438,6 @@ const shouldShowSceneImageEffectPreview = computed(() => {
   return !(activeImageOverlay.value?.acceptsEffects ?? false);
 });
 
-const normalizeHexColor = (value: string, fallback: string) => {
-  const normalized = value.trim();
-  return /^#([0-9a-fA-F]{6})$/.test(normalized) ? normalized.toLowerCase() : fallback.toLowerCase();
-};
-
-const resolveThemeId = (themeId: string) => {
-  if (vuetifyTheme.themes.value[themeId]) return themeId;
-
-  const legacyThemeMap: Record<string, string> = {
-    dark: 'default-light',
-    steel: 'steel-light',
-    ember: 'ember-light',
-    aurora: 'aurora-light'
-  };
-
-  return legacyThemeMap[themeId] || 'default-light';
-};
-
-const getThemeFamilyId = (themeId: string) => themeId.replace(/-(light|dark)$/, '');
-
-const createThemeDefinitionFromPalette = (palette: EditorThemePalette) =>
-  createEditorThemeDefinition(palette);
-
-const getThemePaletteFromDefinition = (themeId: string): EditorThemePalette => {
-  const definition = vuetifyTheme.themes.value[themeId] ?? editorThemePresets['default-dark'];
-  const colors = definition.colors ?? {};
-
-  return {
-    background: colors.background ?? '#121313',
-    surface: colors.surface ?? '#1b1d1d',
-    surfaceVariant: colors['surface-variant'] ?? '#23272d',
-    primary: colors.primary ?? '#64b5f6',
-    secondary: colors.secondary ?? '#9575cd'
-  };
-};
-
-const registerCustomEditorTheme = (themeConfig: SavedEditorTheme) => {
-  vuetifyTheme.themes.value[themeConfig.id] = createThemeDefinitionFromPalette(themeConfig.colors) as typeof vuetifyTheme.themes.value[string];
-};
-
-const saveCustomEditorThemes = () => {
-  localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(customEditorThemes.value));
-};
-
-const applyEditorTheme = (themeId: string) => {
-  const resolvedThemeId = resolveThemeId(themeId);
-  if (!vuetifyTheme.themes.value[resolvedThemeId]) return;
-
-  activeEditorThemeId.value = resolvedThemeId;
-  vuetifyTheme.global.name.value = resolvedThemeId;
-  localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, resolvedThemeId);
-};
-
-const loadEditorThemes = () => {
-  const savedThemes = localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY);
-  if (savedThemes) {
-    try {
-      const parsedThemes = JSON.parse(savedThemes);
-      if (Array.isArray(parsedThemes)) {
-        customEditorThemes.value = parsedThemes
-          .filter((themeConfig) => themeConfig && typeof themeConfig.id === 'string' && typeof themeConfig.name === 'string')
-          .map((themeConfig) => ({
-            id: themeConfig.id,
-            name: themeConfig.name,
-            createdAt: themeConfig.createdAt || new Date().toISOString(),
-            colors: {
-              background: normalizeHexColor(themeConfig.colors?.background || '', '#121313'),
-              surface: normalizeHexColor(themeConfig.colors?.surface || '', '#1b1d1d'),
-              surfaceVariant: normalizeHexColor(themeConfig.colors?.surfaceVariant || '', '#232626'),
-              primary: normalizeHexColor(themeConfig.colors?.primary || '', '#42a5f5'),
-              secondary: normalizeHexColor(themeConfig.colors?.secondary || '', '#7e57c2')
-            }
-          }));
-      }
-    } catch (error) {
-      console.error('Error loading custom editor themes:', error);
-    }
-  }
-
-  customEditorThemes.value.forEach(registerCustomEditorTheme);
-
-  const storedThemeId = localStorage.getItem(ACTIVE_THEME_STORAGE_KEY) || 'default-light';
-  if (vuetifyTheme.themes.value[storedThemeId]) {
-    applyEditorTheme(storedThemeId);
-  } else {
-    applyEditorTheme(resolveThemeId(storedThemeId));
-  }
-
-  Object.assign(themeDraftColors, getThemePaletteFromDefinition(activeEditorThemeId.value));
-};
-
-const populateThemeDraftFromActiveTheme = () => {
-  Object.assign(themeDraftColors, getThemePaletteFromDefinition(activeEditorThemeId.value));
-  themeDraftName.value = '';
-};
-
-const saveCustomEditorTheme = () => {
-  const trimmedName = themeDraftName.value.trim();
-  if (!trimmedName) return;
-
-  const customTheme: SavedEditorTheme = {
-    id: `custom-theme-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: trimmedName,
-    createdAt: new Date().toISOString(),
-    colors: {
-      background: normalizeHexColor(themeDraftColors.background, '#f4f5f7'),
-      surface: normalizeHexColor(themeDraftColors.surface, '#ffffff'),
-      surfaceVariant: normalizeHexColor(themeDraftColors.surfaceVariant, '#edf1f5'),
-      primary: normalizeHexColor(themeDraftColors.primary, '#42a5f5'),
-      secondary: normalizeHexColor(themeDraftColors.secondary, '#7e57c2')
-    }
-  };
-
-  customEditorThemes.value.push(customTheme);
-  registerCustomEditorTheme(customTheme);
-  saveCustomEditorThemes();
-  applyEditorTheme(customTheme.id);
-  themeDraftName.value = '';
-};
-
-const deleteCustomEditorTheme = (themeId: string) => {
-  customEditorThemes.value = customEditorThemes.value.filter((themeConfig) => themeConfig.id !== themeId);
-  delete vuetifyTheme.themes.value[themeId];
-  saveCustomEditorThemes();
-
-  if (activeEditorThemeId.value === themeId) {
-    applyEditorTheme('default-light');
-  }
-};
-
-const exportActiveTheme = () => {
-  const customTheme = customEditorThemes.value.find((themeConfig) => themeConfig.id === activeEditorThemeId.value);
-  const payload = customTheme
-    ? customTheme
-    : {
-        id: activeEditorThemeId.value,
-        name: builtInThemeOptions.find((themeOption) => themeOption.id === getThemeFamilyId(activeEditorThemeId.value))?.name || 'Theme',
-        createdAt: new Date().toISOString(),
-        colors: getThemePaletteFromDefinition(activeEditorThemeId.value)
-      };
-
-  themeSharePayload.value = JSON.stringify(payload, null, 2);
-};
-
-const importSharedTheme = () => {
-  if (!themeImportPayload.value.trim()) return;
-
-  try {
-    const importedTheme = JSON.parse(themeImportPayload.value);
-    const trimmedName = typeof importedTheme.name === 'string' ? importedTheme.name.trim() : '';
-    if (!trimmedName) return;
-
-    const themeConfig: SavedEditorTheme = {
-      id: `custom-theme-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name: trimmedName,
-      createdAt: new Date().toISOString(),
-      colors: {
-        background: normalizeHexColor(importedTheme.colors?.background || '', '#f4f5f7'),
-        surface: normalizeHexColor(importedTheme.colors?.surface || '', '#ffffff'),
-        surfaceVariant: normalizeHexColor(importedTheme.colors?.surfaceVariant || '', '#edf1f5'),
-        primary: normalizeHexColor(importedTheme.colors?.primary || '', '#42a5f5'),
-        secondary: normalizeHexColor(importedTheme.colors?.secondary || '', '#7e57c2')
-      }
-    };
-
-    customEditorThemes.value.push(themeConfig);
-    registerCustomEditorTheme(themeConfig);
-    saveCustomEditorThemes();
-    applyEditorTheme(themeConfig.id);
-    themeImportPayload.value = '';
-  } catch (error) {
-    console.error('Error importing shared theme:', error);
-  }
-};
-
 const getChatOverlayName = (rawText: string, overlayIndex: number) => {
   const firstLine = rawText
     .split('\n')
@@ -2525,9 +1567,14 @@ const applyHistoryEntry = (entry: EditorHistoryEntry) => {
   currentProjectName.value = entry.currentProjectName;
   showUnsavedChangesDialog.value = false;
   pendingEditorAction.value = null;
-  window.setTimeout(() => {
+  if (applyHistoryStateTimer) {
+    clearTimeout(applyHistoryStateTimer);
+  }
+  const clearApplyingHistoryState = () => {
     isApplyingHistoryState.value = false;
-  }, 0);
+    applyHistoryStateTimer = null;
+  };
+  applyHistoryStateTimer = window.setTimeout(clearApplyingHistoryState, 0);
 };
 
 const undoEditorChange = () => {
@@ -2854,466 +1901,6 @@ const applyEditorSnapshot = (snapshot: Partial<EditorStateSnapshot>) => {
   });
 };
 
-const openProjectsDb = () =>
-  new Promise<IDBDatabase>((resolve, reject) => {
-    const request = window.indexedDB.open(PROJECTS_DB_NAME, PROJECTS_DB_VERSION);
-
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(PROJECTS_STORE_NAME)) {
-        db.createObjectStore(PROJECTS_STORE_NAME, { keyPath: 'id' });
-      }
-    };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-
-const getProjectStore = async (mode: IDBTransactionMode) => {
-  const db = await openProjectsDb();
-  const transaction = db.transaction(PROJECTS_STORE_NAME, mode);
-  const store = transaction.objectStore(PROJECTS_STORE_NAME);
-  return { db, transaction, store };
-};
-
-const listStoredProjects = async () =>
-  new Promise<ProjectRecord[]>(async (resolve, reject) => {
-    try {
-      const { db, transaction, store } = await getProjectStore('readonly');
-      const request = store.getAll();
-
-      request.onsuccess = () => {
-        db.close();
-        resolve((request.result as ProjectRecord[]).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
-      };
-      request.onerror = () => {
-        db.close();
-        reject(request.error);
-      };
-      transaction.onerror = () => {
-        db.close();
-        reject(transaction.error);
-      };
-    } catch (error) {
-      reject(error);
-    }
-  });
-
-const saveStoredProject = async (project: ProjectRecord) =>
-  new Promise<void>(async (resolve, reject) => {
-    try {
-      const { db, transaction, store } = await getProjectStore('readwrite');
-      const request = store.put(project);
-
-      request.onsuccess = () => {
-        db.close();
-        resolve();
-      };
-      request.onerror = () => {
-        db.close();
-        reject(request.error);
-      };
-      transaction.onerror = () => {
-        db.close();
-        reject(transaction.error);
-      };
-    } catch (error) {
-      reject(error);
-    }
-  });
-
-const loadStoredProject = async (projectId: string) =>
-  new Promise<ProjectRecord | undefined>(async (resolve, reject) => {
-    try {
-      const { db, transaction, store } = await getProjectStore('readonly');
-      const request = store.get(projectId);
-
-      request.onsuccess = () => {
-        db.close();
-        resolve(request.result as ProjectRecord | undefined);
-      };
-      request.onerror = () => {
-        db.close();
-        reject(request.error);
-      };
-      transaction.onerror = () => {
-        db.close();
-        reject(transaction.error);
-      };
-    } catch (error) {
-      reject(error);
-    }
-  });
-
-const deleteStoredProject = async (projectId: string) =>
-  new Promise<void>(async (resolve, reject) => {
-    try {
-      const { db, transaction, store } = await getProjectStore('readwrite');
-      const request = store.delete(projectId);
-
-      request.onsuccess = () => {
-        db.close();
-        resolve();
-      };
-      request.onerror = () => {
-        db.close();
-        reject(request.error);
-      };
-      transaction.onerror = () => {
-        db.close();
-        reject(transaction.error);
-      };
-    } catch (error) {
-      reject(error);
-    }
-  });
-
-const refreshProjectList = async () => {
-  isProjectsLoading.value = true;
-
-  try {
-    const projects = await listStoredProjects();
-    projectRecords.value = projects.map(({ id, name, createdAt, updatedAt }) => ({ id, name, createdAt, updatedAt }));
-  } catch (error) {
-    console.error('Error loading projects:', error);
-  } finally {
-    isProjectsLoading.value = false;
-  }
-};
-
-const clearChatlog = () => {
-  chatlogText.value = '';
-  selectedText.lineIndex = -1;
-  selectedText.startOffset = 0;
-  selectedText.endOffset = 0;
-  selectedText.text = '';
-};
-
-const TIMESTAMP_PREFIX_PATTERN = /^\[\d{2}:\d{2}:\d{2}\]\s*/;
-
-const stripTimestampPrefix = (line: string) =>
-  line.replace(TIMESTAMP_PREFIX_PATTERN, '');
-
-const getTimestampPrefixLength = (line: string) => {
-  const timestampMatch = line.match(TIMESTAMP_PREFIX_PATTERN);
-  return timestampMatch ? timestampMatch[0].length : 0;
-};
-
-const parseChatText = (rawText: string) => {
-  const lines = rawText.split('\n').filter(line => line.trim() !== '');
-
-  return lines.map((line, index) => {
-    return {
-      id: index,
-      text: stripTimestampPrefix(line)
-    };
-  });
-};
-
-const getDisplayedLineText = (line: string) => stripTimestampPrefix(line);
-
-const getDisplayedSelectionRange = (line: string, rawStartOffset: number, rawEndOffset: number) => {
-  const displayedLine = getDisplayedLineText(line);
-  const strippedLength = getTimestampPrefixLength(line);
-
-  return {
-    displayedLine,
-    startOffset: Math.max(0, rawStartOffset - strippedLength),
-    endOffset: Math.max(0, rawEndOffset - strippedLength)
-  };
-};
-
-const escapeHtml = (text: string) =>
-  text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-
-const getAutomaticLineColors = (text: string) => {
-  const colors = Array(text.length).fill('rgb(255, 255, 255)');
-
-  const cellphonePattern = colorMappings.find((mapping) =>
-    mapping.checkPlayerName && mapping.pattern.test(text)
-  );
-
-  if (cellphonePattern && characterName.value) {
-    const color = text.startsWith(characterName.value)
-      ? 'rgb(255, 255, 255)'
-      : cellphonePattern.color;
-    return colors.fill(color);
-  }
-
-  const fullLinePattern = colorMappings.find((mapping) =>
-    mapping.fullLine && !mapping.checkPlayerName && mapping.pattern.test(text)
-  );
-
-  if (fullLinePattern) {
-    return colors.fill(fullLinePattern.color);
-  }
-
-  const splitPattern = colorMappings.find((mapping) =>
-    mapping.splitPattern && mapping.pattern.test(text)
-  );
-
-  if (splitPattern?.splitPattern && splitPattern.markerColor) {
-    colors.fill(splitPattern.color);
-    const flags = splitPattern.splitPattern.flags.includes('g')
-      ? splitPattern.splitPattern.flags
-      : `${splitPattern.splitPattern.flags}g`;
-    const regex = new RegExp(splitPattern.splitPattern.source, flags);
-
-    for (const match of text.matchAll(regex)) {
-      const matchText = match[0];
-      const matchIndex = match.index ?? 0;
-      for (let index = matchIndex; index < matchIndex + matchText.length; index++) {
-        colors[index] = splitPattern.markerColor;
-      }
-    }
-
-    return colors;
-  }
-
-  for (const mapping of colorMappings) {
-    if (mapping.pattern.test(text)) {
-      return colors.fill(mapping.color);
-    }
-  }
-
-  return colors;
-};
-
-const getStyledCharacters = (overlay: ChatOverlay, lineIndex: number, text: string) => {
-  const colors = getAutomaticLineColors(text);
-  const censorTypes = Array<CensorType | undefined>(text.length).fill(undefined);
-
-  overlay.manualColorRegions.forEach((region) => {
-    if (region.lineIndex !== lineIndex) return;
-
-    for (let index = Math.max(0, region.startOffset); index < Math.min(text.length, region.endOffset); index++) {
-      colors[index] = region.color;
-    }
-  });
-
-  overlay.censoredRegions.forEach((region) => {
-    if (region.lineIndex !== lineIndex) return;
-
-    for (let index = Math.max(0, region.startOffset); index < Math.min(text.length, region.endOffset); index++) {
-      censorTypes[index] = region.type;
-    }
-  });
-
-  return text.split('').map((character, index) => ({
-    character,
-    color: colors[index] || 'rgb(255, 255, 255)',
-    censorType: censorTypes[index]
-  }));
-};
-
-const collapseStyledCharacters = (
-  characters: Array<{ character: string; color: string; censorType?: CensorType }>
-) => {
-  if (characters.length === 0) return [];
-
-  const runs: Array<{ text: string; color: string; censorType?: CensorType }> = [];
-  let currentRun = { ...characters[0], text: characters[0].character };
-
-  for (let index = 1; index < characters.length; index++) {
-    const currentCharacter = characters[index];
-
-    if (
-      currentCharacter.color === currentRun.color &&
-      currentCharacter.censorType === currentRun.censorType
-    ) {
-      currentRun.text += currentCharacter.character;
-    } else {
-      runs.push({
-        text: currentRun.text,
-        color: currentRun.color,
-        censorType: currentRun.censorType
-      });
-      currentRun = { ...currentCharacter, text: currentCharacter.character };
-    }
-  }
-
-  runs.push({
-    text: currentRun.text,
-    color: currentRun.color,
-    censorType: currentRun.censorType
-  });
-
-  return runs;
-};
-
-const buildStyledLineHtml = (overlay: ChatOverlay, lineIndex: number, text: string) =>
-  collapseStyledCharacters(getStyledCharacters(overlay, lineIndex, text))
-    .map((run) => {
-      const classNames = [];
-      if (run.censorType === CensorType.Invisible) classNames.push('censored-invisible');
-      if (run.censorType === CensorType.BlackBar) classNames.push('censored-blackbar');
-      if (run.censorType === CensorType.Blur) classNames.push('censored-blur');
-
-      const classAttribute = classNames.length > 0 ? ` class="${classNames.join(' ')}"` : '';
-      const styleParts = [`color: ${run.color}`];
-
-      if (run.censorType === CensorType.Invisible || run.censorType === CensorType.BlackBar) {
-        styleParts.push('color: transparent');
-      }
-
-      const styleAttribute = ` style="${styleParts.join('; ')}"`;
-      return `<span${classAttribute}${styleAttribute}>${escapeHtml(run.text)}</span>`;
-    })
-    .join('');
-
-const syncEditorFromActiveOverlay = () => {
-  if (!activeChatOverlay.value) {
-    chatlogText.value = '';
-    chatLineWidth.value = DEFAULT_CHAT_LINE_WIDTH;
-    return;
-  }
-
-  chatlogText.value = activeChatOverlay.value.rawText;
-  chatLineWidth.value = activeChatOverlay.value.lineWidth;
-};
-
-const selectChatOverlay = (overlayId: string | null) => {
-  activeChatOverlayId.value = overlayId;
-  syncEditorFromActiveOverlay();
-  selectedText.lineIndex = -1;
-  selectedText.startOffset = 0;
-  selectedText.endOffset = 0;
-  selectedText.text = '';
-};
-
-const startNewChatLayer = () => {
-  activeChatOverlayId.value = null;
-  chatlogText.value = '';
-  chatLineWidth.value = DEFAULT_CHAT_LINE_WIDTH;
-  selectedText.lineIndex = -1;
-  selectedText.startOffset = 0;
-  selectedText.endOffset = 0;
-  selectedText.text = '';
-};
-
-const removeChatOverlay = (overlayId: string) => {
-  const overlayIndex = chatOverlays.value.findIndex((overlay) => overlay.id === overlayId);
-  if (overlayIndex === -1) return;
-
-  chatOverlays.value.splice(overlayIndex, 1);
-
-  if (activeChatOverlayId.value === overlayId) {
-    const nextOverlay = chatOverlays.value[Math.max(0, overlayIndex - 1)] ?? chatOverlays.value[0] ?? null;
-    selectChatOverlay(nextOverlay?.id ?? null);
-  }
-
-  renderKey.value++;
-};
-
-const duplicateChatOverlay = (overlayId: string) => {
-  const sourceOverlay = chatOverlays.value.find((overlay) => overlay.id === overlayId);
-  if (!sourceOverlay) return;
-
-  const overlayIndex = chatOverlays.value.length;
-  const duplicatedOverlay = cloneChatOverlay({
-    ...sourceOverlay,
-    id: createOverlayId(),
-    name: `${sourceOverlay.name} Copy`,
-    transform: {
-      ...sourceOverlay.transform,
-      x: sourceOverlay.transform.x + 16,
-      y: sourceOverlay.transform.y + 16
-    }
-  }, overlayIndex);
-
-  chatOverlays.value.push(duplicatedOverlay);
-  selectChatOverlay(duplicatedOverlay.id);
-  renderKey.value++;
-};
-
-const toggleChatOverlayVisibility = (overlayId: string) => {
-  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay) return;
-
-  overlay.isHidden = !overlay.isHidden;
-
-  if (overlay.isHidden && activeChatOverlayId.value === overlayId) {
-    syncEditorFromActiveOverlay();
-  }
-
-  renderKey.value++;
-};
-
-const toggleChatOverlayLock = (overlayId: string) => {
-  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay) return;
-
-  overlay.isLocked = !overlay.isLocked;
-
-  if (overlay.isLocked && isChatPanning.value && activeChatOverlayId.value === overlayId) {
-    handleChatMouseUpOrLeave();
-  }
-
-  renderKey.value++;
-};
-
-const reparseChatOverlays = () => {
-  chatOverlays.value.forEach((overlay, index) => {
-    overlay.parsedLines = parseChatText(overlay.rawText);
-    overlay.name = getChatOverlayName(overlay.rawText, index);
-  });
-  renderKey.value++;
-};
-
-const parseChatlog = () => {
-  const rawText = chatlogText.value;
-  const parsedLines = parseChatText(rawText);
-  const isEditingExistingOverlay = Boolean(activeChatOverlay.value);
-
-  if (parsedLines.length === 0) {
-    if (activeChatOverlay.value) {
-      activeChatOverlay.value.rawText = rawText;
-      activeChatOverlay.value.parsedLines = [];
-      activeChatOverlay.value.name = getChatOverlayName(rawText, chatOverlays.value.indexOf(activeChatOverlay.value));
-      activeChatOverlay.value.lineWidth = chatLineWidth.value;
-    }
-    renderKey.value++;
-    return;
-  }
-
-  if (activeChatOverlay.value) {
-    activeChatOverlay.value.rawText = rawText;
-    activeChatOverlay.value.parsedLines = parsedLines;
-    activeChatOverlay.value.lineWidth = chatLineWidth.value;
-    activeChatOverlay.value.name = getChatOverlayName(rawText, chatOverlays.value.indexOf(activeChatOverlay.value));
-  } else {
-    const overlayIndex = chatOverlays.value.length;
-    const newOverlay: ChatOverlay = {
-      id: createOverlayId(),
-      name: getChatOverlayName(rawText, overlayIndex),
-      rawText,
-      parsedLines,
-      transform: createDefaultChatTransform(),
-      censoredRegions: [],
-      manualColorRegions: [],
-      lineWidth: chatLineWidth.value,
-      isHidden: false,
-      isLocked: false
-    };
-
-    chatOverlays.value.push(newOverlay);
-    activeChatOverlayId.value = newOverlay.id;
-  }
-
-  trackEvent('parse_chatlog', {
-    mode: isEditingExistingOverlay ? 'update' : 'create',
-    parsed_lines_count: parsedLines.length,
-    raw_characters_count: rawText.length,
-    ...getAnalyticsContext()
-  });
-
-  renderKey.value++;
-};
 
 // --- File Handling Methods ---
 
@@ -3572,413 +2159,6 @@ const getCanvasInteractionScale = () => {
   return scale > 0 ? scale : 1;
 };
 
-const clearSmartGuides = () => {
-  smartGuideLines.value = [];
-  smartGuideLabels.value = [];
-};
-
-const beginCapturedCanvasDrag = (
-  event: PointerEvent,
-  moveHandler: (event: PointerEvent) => void,
-  endHandler: (event?: PointerEvent) => void
-) => {
-  const target = event.currentTarget;
-  if (!(target instanceof HTMLElement)) {
-    return;
-  }
-
-  activeCanvasDragCleanup?.();
-
-  const pointerId = event.pointerId;
-  const cleanup = () => {
-    window.removeEventListener('pointermove', handlePointerMove, true);
-    window.removeEventListener('pointerup', handlePointerEnd, true);
-    window.removeEventListener('pointercancel', handlePointerEnd, true);
-    target.removeEventListener('lostpointercapture', handleLostPointerCapture);
-
-    if (target.hasPointerCapture(pointerId)) {
-      target.releasePointerCapture(pointerId);
-    }
-
-    if (activeCanvasDragCleanup === cleanup) {
-      activeCanvasDragCleanup = null;
-    }
-  };
-
-  const handlePointerMove = (pointerEvent: PointerEvent) => {
-    if (pointerEvent.pointerId !== pointerId) return;
-    moveHandler(pointerEvent);
-  };
-
-  const handlePointerEnd = (pointerEvent: PointerEvent) => {
-    if (pointerEvent.pointerId !== pointerId) return;
-    cleanup();
-    endHandler(pointerEvent);
-  };
-
-  const handleLostPointerCapture = () => {
-    cleanup();
-    endHandler();
-  };
-
-  target.setPointerCapture(pointerId);
-  window.addEventListener('pointermove', handlePointerMove, true);
-  window.addEventListener('pointerup', handlePointerEnd, true);
-  window.addEventListener('pointercancel', handlePointerEnd, true);
-  target.addEventListener('lostpointercapture', handleLostPointerCapture);
-  activeCanvasDragCleanup = cleanup;
-};
-
-const createGuideBounds = (left: number, top: number, width: number, height: number): GuideBounds => ({
-  left,
-  top,
-  right: left + width,
-  bottom: top + height,
-  centerX: left + (width / 2),
-  centerY: top + (height / 2),
-  width,
-  height
-});
-
-const getImageOverlayGuideBounds = (
-  overlay: ImageOverlay,
-  element: HTMLElement,
-  x: number = overlay.transform.x,
-  y: number = overlay.transform.y
-) => {
-  const width = element.offsetWidth * overlay.transform.scale;
-  const height = element.offsetHeight * overlay.transform.scale;
-  return createGuideBounds(x, y, width, height);
-};
-
-const getChatOverlayGuideBounds = (
-  overlay: ChatOverlay,
-  element: HTMLElement,
-  x: number = overlay.transform.x,
-  y: number = overlay.transform.y
-) => {
-  const width = element.offsetWidth * overlay.transform.scale;
-  const height = element.offsetHeight * overlay.transform.scale;
-  return createGuideBounds(x, y, width, height);
-};
-
-const collectSmartGuideBounds = (
-  draggingType: 'chat' | 'image',
-  draggingId: string
-) => {
-  const bounds: GuideBounds[] = [];
-
-  imageOverlays.value.forEach((overlay) => {
-    if (overlay.id === draggingId && draggingType === 'image') return;
-    if (overlay.isHidden) return;
-
-    const element = imageOverlayElementMap.get(overlay.id);
-    if (!element) return;
-
-    bounds.push(getImageOverlayGuideBounds(overlay, element));
-  });
-
-  chatOverlays.value.forEach((overlay) => {
-    if (overlay.id === draggingId && draggingType === 'chat') return;
-    if (overlay.isHidden || overlay.parsedLines.length === 0) return;
-
-    const element = chatOverlayElementMap.get(overlay.id);
-    if (!element) return;
-
-    bounds.push(getChatOverlayGuideBounds(overlay, element));
-  });
-
-  return bounds;
-};
-
-const getBestAxisSnap = (
-  movingPoints: number[],
-  targets: number[]
-): AxisSnap | null => {
-  let bestDelta = Number.POSITIVE_INFINITY;
-  let bestTarget: number | null = null;
-
-  movingPoints.forEach((point) => {
-    targets.forEach((target) => {
-      const delta = target - point;
-      if (Math.abs(delta) <= smartGuideStrength.value && Math.abs(delta) < Math.abs(bestDelta)) {
-        bestDelta = delta;
-        bestTarget = target;
-      }
-    });
-  });
-
-  if (bestTarget === null || !Number.isFinite(bestDelta)) {
-    return null;
-  }
-
-  return {
-    delta: bestDelta,
-    target: bestTarget
-  };
-};
-
-const rangesOverlap = (startA: number, endA: number, startB: number, endB: number) =>
-  Math.min(endA, endB) - Math.max(startA, startB) > 0;
-
-const getSpacingSnap = (
-  proposedBounds: GuideBounds,
-  stationaryBounds: GuideBounds[],
-  axis: 'horizontal' | 'vertical'
-): SpacingSnap | null => {
-  let bestMatch: SpacingSnap | null = null;
-
-  stationaryBounds.forEach((before) => {
-    stationaryBounds.forEach((after) => {
-      if (before === after) return;
-
-      if (axis === 'horizontal') {
-        if (before.right > proposedBounds.left || after.left < proposedBounds.right) return;
-        if (!rangesOverlap(before.top, before.bottom, proposedBounds.top, proposedBounds.bottom)) return;
-        if (!rangesOverlap(after.top, after.bottom, proposedBounds.top, proposedBounds.bottom)) return;
-
-        const targetX = (before.right + after.left - proposedBounds.width) / 2;
-        const delta = targetX - proposedBounds.left;
-        if (Math.abs(delta) > smartGuideStrength.value) return;
-
-        const gap = targetX - before.right;
-        if (!bestMatch || Math.abs(delta) < Math.abs(bestMatch.delta)) {
-          bestMatch = { delta, gap, before, after };
-        }
-        return;
-      }
-
-      if (before.bottom > proposedBounds.top || after.top < proposedBounds.bottom) return;
-      if (!rangesOverlap(before.left, before.right, proposedBounds.left, proposedBounds.right)) return;
-      if (!rangesOverlap(after.left, after.right, proposedBounds.left, proposedBounds.right)) return;
-
-      const targetY = (before.bottom + after.top - proposedBounds.height) / 2;
-      const delta = targetY - proposedBounds.top;
-      if (Math.abs(delta) > smartGuideStrength.value) return;
-
-      const gap = targetY - before.bottom;
-      if (!bestMatch || Math.abs(delta) < Math.abs(bestMatch.delta)) {
-        bestMatch = { delta, gap, before, after };
-      }
-    });
-  });
-
-  return bestMatch;
-};
-
-const applySmartGuides = (
-  draggingType: 'chat' | 'image',
-  draggingId: string,
-  proposedBounds: GuideBounds,
-  bypassSnapping = false
-) => {
-  if (bypassSnapping || !smartGuidesEnabled.value) {
-    clearSmartGuides();
-    return {
-      x: proposedBounds.left,
-      y: proposedBounds.top
-    };
-  }
-
-  const stationaryBounds = collectSmartGuideBounds(draggingType, draggingId);
-  const verticalTargets = [0, (dropZoneWidth.value || 800) / 2, dropZoneWidth.value || 800];
-  const horizontalTargets = [0, (dropZoneHeight.value || 600) / 2, dropZoneHeight.value || 600];
-
-  stationaryBounds.forEach((bounds) => {
-    verticalTargets.push(bounds.left, bounds.centerX, bounds.right);
-    horizontalTargets.push(bounds.top, bounds.centerY, bounds.bottom);
-  });
-
-  const verticalSnap = getBestAxisSnap(
-    [proposedBounds.left, proposedBounds.centerX, proposedBounds.right],
-    verticalTargets
-  );
-  const horizontalSnap = getBestAxisSnap(
-    [proposedBounds.top, proposedBounds.centerY, proposedBounds.bottom],
-    horizontalTargets
-  );
-  const horizontalSpacingSnap = getSpacingSnap(proposedBounds, stationaryBounds, 'horizontal');
-  const verticalSpacingSnap = getSpacingSnap(proposedBounds, stationaryBounds, 'vertical');
-
-  const resolvedX = proposedBounds.left
-    + (horizontalSpacingSnap?.delta ?? verticalSnap?.delta ?? 0);
-  const resolvedY = proposedBounds.top
-    + (verticalSpacingSnap?.delta ?? horizontalSnap?.delta ?? 0);
-
-  const nextLines: SmartGuideLine[] = [];
-  const nextLabels: SmartGuideLabel[] = [];
-  if (verticalSnap) {
-    nextLines.push({
-      kind: 'alignment',
-      orientation: 'vertical',
-      position: verticalSnap.target,
-      start: 0,
-      end: dropZoneHeight.value || 600
-    });
-  }
-  if (horizontalSnap) {
-    nextLines.push({
-      kind: 'alignment',
-      orientation: 'horizontal',
-      position: horizontalSnap.target,
-      start: 0,
-      end: dropZoneWidth.value || 800
-    });
-  }
-  if (horizontalSpacingSnap) {
-    const spacingY = proposedBounds.centerY + (verticalSpacingSnap?.delta ?? 0);
-    const leftX = horizontalSpacingSnap.before.right;
-    const snappedLeft = resolvedX;
-    const snappedRight = resolvedX + proposedBounds.width;
-    const rightX = horizontalSpacingSnap.after.left;
-
-    nextLines.push({
-      kind: 'spacing',
-      orientation: 'horizontal',
-      position: spacingY,
-      start: leftX,
-      end: snappedLeft
-    });
-    nextLines.push({
-      kind: 'spacing',
-      orientation: 'horizontal',
-      position: spacingY,
-      start: snappedRight,
-      end: rightX
-    });
-    nextLabels.push({
-      text: `${Math.round(horizontalSpacingSnap.gap)} px`,
-      x: (leftX + snappedLeft) / 2,
-      y: spacingY - 12
-    });
-    nextLabels.push({
-      text: `${Math.round(horizontalSpacingSnap.gap)} px`,
-      x: (snappedRight + rightX) / 2,
-      y: spacingY - 12
-    });
-  }
-  if (verticalSpacingSnap) {
-    const spacingX = proposedBounds.centerX + (horizontalSpacingSnap?.delta ?? verticalSnap?.delta ?? 0);
-    const topY = verticalSpacingSnap.before.bottom;
-    const snappedTop = resolvedY;
-    const snappedBottom = resolvedY + proposedBounds.height;
-    const bottomY = verticalSpacingSnap.after.top;
-
-    nextLines.push({
-      kind: 'spacing',
-      orientation: 'vertical',
-      position: spacingX,
-      start: topY,
-      end: snappedTop
-    });
-    nextLines.push({
-      kind: 'spacing',
-      orientation: 'vertical',
-      position: spacingX,
-      start: snappedBottom,
-      end: bottomY
-    });
-    nextLabels.push({
-      text: `${Math.round(verticalSpacingSnap.gap)} px`,
-      x: spacingX + 10,
-      y: (topY + snappedTop) / 2
-    });
-    nextLabels.push({
-      text: `${Math.round(verticalSpacingSnap.gap)} px`,
-      x: spacingX + 10,
-      y: (snappedBottom + bottomY) / 2
-    });
-  }
-  smartGuideLines.value = nextLines;
-  smartGuideLabels.value = nextLabels;
-
-  return {
-    x: resolvedX,
-    y: resolvedY
-  };
-};
-
-const setImageOverlayElement = (overlayId: string, element: TemplateRefElement) => {
-  if (element instanceof HTMLCanvasElement) {
-    imageOverlayElementMap.set(overlayId, element);
-    void renderImageOverlayCanvas(overlayId);
-    return;
-  }
-
-  imageOverlayElementMap.delete(overlayId);
-};
-
-const setChatOverlayElement = (overlayId: string, element: TemplateRefElement) => {
-  if (element instanceof HTMLElement) {
-    chatOverlayElementMap.set(overlayId, element);
-    return;
-  }
-
-  chatOverlayElementMap.delete(overlayId);
-};
-
-const buildImageTransform = (x: number, y: number, scale: number) =>
-  `translate(${x}px, ${y}px) scale(${scale})`;
-
-const applyImmediateImageDragPosition = () => {
-  if (activeImageDragTarget.value === 'overlay' && activeImageOverlayId.value) {
-    const element = imageOverlayElementMap.get(activeImageOverlayId.value);
-    const overlay = activeImageOverlay.value;
-    if (element && overlay) {
-      element.style.transform = buildImageTransform(
-        pendingImageDragPosition.x,
-        pendingImageDragPosition.y,
-        overlay.transform.scale
-      );
-    }
-    return;
-  }
-
-  if (imageElementRef.value) {
-    imageElementRef.value.style.transform = buildImageTransform(
-      pendingImageDragPosition.x,
-      pendingImageDragPosition.y,
-      imageTransform.scale
-    );
-  }
-};
-
-const scheduleImmediateImageDragPosition = () => {
-  if (typeof window === 'undefined') return;
-  if (imageDragAnimationFrame !== null) return;
-
-  imageDragAnimationFrame = window.requestAnimationFrame(() => {
-    imageDragAnimationFrame = null;
-    applyImmediateImageDragPosition();
-  });
-};
-
-const buildChatTransform = (x: number, y: number, scale: number) =>
-  `translate(${x}px, ${y}px) scale(${scale})`;
-
-const applyImmediateChatDragPosition = () => {
-  if (!activeChatOverlayId.value || !activeChatOverlay.value) return;
-
-  const element = chatOverlayElementMap.get(activeChatOverlayId.value);
-  if (!element) return;
-
-  element.style.transform = buildChatTransform(
-    pendingChatDragPosition.x,
-    pendingChatDragPosition.y,
-    activeChatOverlay.value.transform.scale
-  );
-};
-
-const scheduleImmediateChatDragPosition = () => {
-  if (typeof window === 'undefined') return;
-  if (chatDragAnimationFrame !== null) return;
-
-  chatDragAnimationFrame = window.requestAnimationFrame(() => {
-    chatDragAnimationFrame = null;
-    applyImmediateChatDragPosition();
-  });
-};
-
 const handleDrop = (event: DragEvent) => {
   event.preventDefault();
   isDraggingOverDropZone.value = false;
@@ -4008,499 +2188,6 @@ const handleDrop = (event: DragEvent) => {
       // Optionally show an error message to the user
     }
   }
-};
-
-// --- Image Panning Handlers ---
-const handleImageMouseDown = (event: PointerEvent) => {
-  if (!isImageDraggingEnabled.value || !droppedImageSrc.value) return;
-  if (activeImageOverlayId.value !== null) return;
-  selectImageOverlay(null);
-  event.preventDefault();
-  isPanning.value = true;
-  panStart.x = event.clientX;
-  panStart.y = event.clientY;
-  panStartImagePos.x = imageTransform.x;
-  panStartImagePos.y = imageTransform.y;
-  pendingImageDragPosition.x = imageTransform.x;
-  pendingImageDragPosition.y = imageTransform.y;
-  document.body.style.userSelect = 'none';
-  beginCapturedCanvasDrag(event, handleImageMouseMove, handleImageMouseUpOrLeave);
-};
-
-const handleImageMouseMove = (event: PointerEvent) => {
-  if (!isPanning.value) return;
-  const interactionScale = getCanvasInteractionScale();
-  const deltaX = (event.clientX - panStart.x) / interactionScale;
-  const deltaY = (event.clientY - panStart.y) / interactionScale;
-
-  if (activeImageDragTarget.value === 'overlay' && activeImageOverlay.value) {
-    const element = imageOverlayElementMap.get(activeImageOverlay.value.id);
-    const proposedX = panStartImagePos.x + deltaX;
-    const proposedY = panStartImagePos.y + deltaY;
-
-    if (element) {
-      const snappedPosition = applySmartGuides(
-        'image',
-        activeImageOverlay.value.id,
-        getImageOverlayGuideBounds(activeImageOverlay.value, element, proposedX, proposedY),
-        isGuideBypassActive.value
-      );
-      pendingImageDragPosition.x = snappedPosition.x;
-      pendingImageDragPosition.y = snappedPosition.y;
-    } else {
-      clearSmartGuides();
-      pendingImageDragPosition.x = proposedX;
-      pendingImageDragPosition.y = proposedY;
-    }
-
-    scheduleImmediateImageDragPosition();
-    return;
-  }
-
-  clearSmartGuides();
-  pendingImageDragPosition.x = panStartImagePos.x + deltaX;
-  pendingImageDragPosition.y = panStartImagePos.y + deltaY;
-  scheduleImmediateImageDragPosition();
-};
-
-const handleImageMouseUpOrLeave = () => {
-  if (isPanning.value) {
-    if (activeImageDragTarget.value === 'overlay' && activeImageOverlay.value) {
-      activeImageOverlay.value.transform.x = pendingImageDragPosition.x;
-      activeImageOverlay.value.transform.y = pendingImageDragPosition.y;
-    } else {
-      imageTransform.x = pendingImageDragPosition.x;
-      imageTransform.y = pendingImageDragPosition.y;
-    }
-
-    isPanning.value = false;
-    document.body.style.userSelect = ''; // Re-enable text selection
-  }
-
-  clearSmartGuides();
-
-  if (imageDragAnimationFrame !== null) {
-    window.cancelAnimationFrame(imageDragAnimationFrame);
-    imageDragAnimationFrame = null;
-  }
-
-};
-
-// --- Image Zoom Handler ---
-const handleWheel = (event: WheelEvent) => {
-  if (!isImageDraggingEnabled.value || !droppedImageSrc.value) return;
-  if (activeImageOverlayId.value !== null) {
-    event.preventDefault();
-    return;
-  }
-  event.preventDefault();
-  const scaleAmount = 0.1;
-  const minScale = 0.1;
-  const maxScale = 10;
-
-  if (event.deltaY < 0) {
-    // Zoom in
-    imageTransform.scale = Math.min(maxScale, imageTransform.scale + scaleAmount);
-  } else {
-    // Zoom out
-    imageTransform.scale = Math.max(minScale, imageTransform.scale - scaleAmount);
-  }
-};
-
-// --- Toolbar Button Handlers ---
-const toggleImageDrag = () => {
-  isImageDraggingEnabled.value = !isImageDraggingEnabled.value;
-  if (isImageDraggingEnabled.value) {
-    imageOverlayTool.value = 'move';
-  }
-  if (isImageDraggingEnabled.value && isChatDraggingEnabled.value) {
-    isChatDraggingEnabled.value = false; // Disable chat drag if enabling image drag
-  }
-
-  if (!isImageDraggingEnabled.value && isPanning.value) {
-    handleImageMouseUpOrLeave();
-  }
-};
-
-const enableImageDragFromCanvas = (event: MouseEvent) => {
-  if (!droppedImageSrc.value) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-  selectImageOverlay(null);
-  imageOverlayTool.value = 'move';
-  isImageDraggingEnabled.value = true;
-  isChatDraggingEnabled.value = false;
-};
-
-const handleImageOverlayMaskPointerMove = (event: PointerEvent) => {
-  const overlayId = activeImageMaskOverlayId.value;
-  if (!overlayId) return;
-
-  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  const element = imageOverlayElementMap.get(overlayId);
-  if (!overlay || !(element instanceof HTMLCanvasElement)) {
-    finishImageOverlayMaskPainting();
-    hideImageMaskBrushPreview();
-    return;
-  }
-
-  const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
-  if (!point) {
-    hideImageMaskBrushPreview();
-    return;
-  }
-
-  paintImageOverlayMaskSegment(
-    overlay,
-    ensureImageOverlayMaskCanvas(overlay, element.width, element.height),
-    imageMaskPaintLastPoint.x,
-    imageMaskPaintLastPoint.y,
-    point.x,
-    point.y
-  );
-
-  imageMaskPaintLastPoint.x = point.x;
-  imageMaskPaintLastPoint.y = point.y;
-  updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
-};
-
-const startImageOverlayMaskPainting = (event: PointerEvent, overlay: ImageOverlay) => {
-  const element = imageOverlayElementMap.get(overlay.id);
-  if (!(element instanceof HTMLCanvasElement)) {
-    return;
-  }
-
-  const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
-  if (!point) {
-    return;
-  }
-
-  event.preventDefault();
-  event.stopPropagation();
-
-  activeImageMaskOverlayId.value = overlay.id;
-  isImageMaskPainting.value = true;
-  imageMaskPaintLastPoint.x = point.x;
-  imageMaskPaintLastPoint.y = point.y;
-  updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
-
-  paintImageOverlayMaskSegment(
-    overlay,
-    ensureImageOverlayMaskCanvas(overlay, element.width, element.height),
-    point.x,
-    point.y,
-    point.x,
-    point.y
-  );
-
-  beginCapturedCanvasDrag(event, handleImageOverlayMaskPointerMove, () => {
-    finishImageOverlayMaskPainting();
-    hideImageMaskBrushPreview();
-  });
-};
-
-const handleImageOverlayPointerMove = (event: PointerEvent, overlayId: string) => {
-  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  const element = imageOverlayElementMap.get(overlayId);
-  if (!overlay || !(element instanceof HTMLCanvasElement)) {
-    hideImageMaskBrushPreview();
-    return;
-  }
-
-  if (!isImageOverlayBrushActive.value || activeImageOverlayId.value !== overlayId || overlay.isLocked) {
-    hideImageMaskBrushPreview();
-    return;
-  }
-
-  const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
-  if (!point) {
-    hideImageMaskBrushPreview();
-    return;
-  }
-
-  updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
-};
-
-const handleImageOverlayPointerLeave = (overlayId: string) => {
-  if (activeImageMaskOverlayId.value === overlayId && isImageMaskPainting.value) {
-    return;
-  }
-
-  hideImageMaskBrushPreview();
-};
-
-const handleImageOverlayMouseDown = (event: PointerEvent, overlayId: string) => {
-  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay) return;
-
-  if (activeImageOverlayId.value !== overlayId) {
-    return;
-  }
-
-  if (isImageOverlayBrushActive.value) {
-    if (overlay.isLocked) return;
-    startImageOverlayMaskPainting(event, overlay);
-    return;
-  }
-
-  if (overlay.isLocked || !isImageDraggingEnabled.value) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-  isPanning.value = true;
-  panStart.x = event.clientX;
-  panStart.y = event.clientY;
-  panStartImagePos.x = overlay.transform.x;
-  panStartImagePos.y = overlay.transform.y;
-  pendingImageDragPosition.x = overlay.transform.x;
-  pendingImageDragPosition.y = overlay.transform.y;
-  isGuideBypassActive.value = isQBypassHeld.value;
-  document.body.style.userSelect = 'none';
-  beginCapturedCanvasDrag(event, handleImageMouseMove, handleImageMouseUpOrLeave);
-};
-
-const enableImageOverlayDragFromCanvas = (event: MouseEvent, overlayId: string) => {
-  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay || overlay.isLocked) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-  selectImageOverlay(overlayId);
-  imageOverlayTool.value = 'move';
-  isImageDraggingEnabled.value = true;
-  isChatDraggingEnabled.value = false;
-};
-
-const handleImageOverlayWheel = (event: WheelEvent, overlayId: string) => {
-  const overlay = imageOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-
-  if (isImageOverlayBrushActive.value && activeImageOverlayId.value === overlayId) {
-    imageMaskBrushSize.value = clampImageMaskBrushSize(
-      imageMaskBrushSize.value + (event.deltaY < 0 ? 14 : -14)
-    );
-    const element = imageOverlayElementMap.get(overlayId);
-    if (element instanceof HTMLCanvasElement) {
-      const point = getImageOverlayCanvasPoint(element, event.clientX, event.clientY);
-      if (point) {
-        updateImageMaskBrushPreview(overlay, point.zoneX, point.zoneY);
-      }
-    }
-    return;
-  }
-
-  if (!isImageDraggingEnabled.value) return;
-
-  if (overlay.isLocked || activeImageOverlayId.value !== overlayId) {
-    return;
-  }
-
-  const scaleAmount = 0.1;
-  const minScale = 0.1;
-  const maxScale = 10;
-
-  overlay.transform.scale = event.deltaY < 0
-    ? Math.min(maxScale, overlay.transform.scale + scaleAmount)
-    : Math.max(minScale, overlay.transform.scale - scaleAmount);
-};
-
-// --- Chat Dragging Handlers ---
-const handleChatMouseDown = (event: PointerEvent, overlayId: string) => {
-  selectChatOverlay(overlayId);
-
-  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay || overlay.parsedLines.length === 0) return;
-
-  event.stopPropagation();
-
-  if (overlay.isLocked || !isChatDraggingEnabled.value) return;
-  
-  // Don't allow chat dragging if image dragging is active and in progress
-  if (isImageDraggingEnabled.value && isPanning.value) {
-    return;
-  }
-  
-  event.preventDefault();
-  isChatPanning.value = true;
-  chatPanStart.x = event.clientX;
-  chatPanStart.y = event.clientY;
-  chatPanStartPos.x = overlay.transform.x;
-  chatPanStartPos.y = overlay.transform.y;
-  pendingChatDragPosition.x = overlay.transform.x;
-  pendingChatDragPosition.y = overlay.transform.y;
-  document.body.style.userSelect = 'none';
-  beginCapturedCanvasDrag(event, handleChatMouseMove, handleChatMouseUpOrLeave);
-};
-
-const handleChatMouseMove = (event: PointerEvent) => {
-  if (!isChatPanning.value || !activeChatOverlay.value) return;
-  
-  // Prevent event from being handled by image drag
-  event.stopPropagation();
-  
-  const interactionScale = getCanvasInteractionScale();
-  const deltaX = (event.clientX - chatPanStart.x) / interactionScale;
-  const deltaY = (event.clientY - chatPanStart.y) / interactionScale;
-  const element = chatOverlayElementMap.get(activeChatOverlay.value.id);
-  const proposedX = chatPanStartPos.x + deltaX;
-  const proposedY = chatPanStartPos.y + deltaY;
-
-  if (element) {
-    const snappedPosition = applySmartGuides(
-      'chat',
-      activeChatOverlay.value.id,
-      getChatOverlayGuideBounds(activeChatOverlay.value, element, proposedX, proposedY),
-      isGuideBypassActive.value
-    );
-    pendingChatDragPosition.x = snappedPosition.x;
-    pendingChatDragPosition.y = snappedPosition.y;
-  } else {
-    clearSmartGuides();
-    pendingChatDragPosition.x = proposedX;
-    pendingChatDragPosition.y = proposedY;
-  }
-
-  scheduleImmediateChatDragPosition();
-};
-
-const handleChatMouseUpOrLeave = (event?: PointerEvent) => {
-  if (isChatPanning.value) {
-    if (activeChatOverlay.value) {
-      activeChatOverlay.value.transform.x = pendingChatDragPosition.x;
-      activeChatOverlay.value.transform.y = pendingChatDragPosition.y;
-    }
-
-    if (event) {
-      event.stopPropagation();
-    }
-    isChatPanning.value = false;
-    document.body.style.userSelect = '';
-  }
-
-  clearSmartGuides();
-
-  if (chatDragAnimationFrame !== null) {
-    window.cancelAnimationFrame(chatDragAnimationFrame);
-    chatDragAnimationFrame = null;
-  }
-
-};
-
-// --- Chat Zoom Handler ---
-const handleChatWheel = (event: WheelEvent, overlayId: string) => {
-  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay || overlay.isLocked || !isChatDraggingEnabled.value || overlay.parsedLines.length === 0) return;
-
-  selectChatOverlay(overlayId);
-  event.preventDefault();
-  event.stopPropagation();
-  const scaleAmount = 0.1;
-  const minScale = 0.5;
-  const maxScale = 3;
-
-  if (event.deltaY < 0) {
-    overlay.transform.scale = Math.min(maxScale, overlay.transform.scale + scaleAmount);
-  } else {
-    overlay.transform.scale = Math.max(minScale, overlay.transform.scale - scaleAmount);
-  }
-};
-
-// Toggle chat dragging
-const toggleChatDrag = () => {
-  isChatDraggingEnabled.value = !isChatDraggingEnabled.value;
-  if (isChatDraggingEnabled.value && isImageDraggingEnabled.value) {
-    isImageDraggingEnabled.value = false; // Disable image drag if enabling chat drag
-  }
-};
-
-const enableChatDragFromCanvas = (event: MouseEvent, overlayId: string) => {
-  const overlay = chatOverlays.value.find((item) => item.id === overlayId);
-  if (!overlay || overlay.isLocked) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-  selectChatOverlay(overlayId);
-  isChatDraggingEnabled.value = true;
-  isImageDraggingEnabled.value = false;
-};
-
-// --- Chat Panel Resize Handlers ---
-const handleResizeMouseDown = (event: MouseEvent) => {
-  // Prevent default behavior (like text selection)
-  event.preventDefault();
-  event.stopPropagation();
-
-  // Record starting coordinates and initial width
-  resizeStartX.value = event.clientX;
-  
-  // Store current width percentage
-  const currentBasis = parseFloat(chatPanelFlexBasis.value);
-  initialChatPanelBasis.value = isNaN(currentBasis) ? 25 : currentBasis;
-  
-  // Set flag for resizing state
-  isResizingChatPanel.value = true;
-  
-  // Set cursor and user-select for entire document during resize
-  document.body.style.cursor = 'col-resize';
-  document.body.style.userSelect = 'none';
-  
-  // Add event listeners for move and up directly to document
-  document.addEventListener('mousemove', handleResizeMouseMove);
-  document.addEventListener('mouseup', handleResizeMouseUp);
-};
-
-const handleResizeMouseMove = (event: MouseEvent) => {
-  // Only proceed if we're in resizing state
-  if (!isResizingChatPanel.value) return;
-  
-  // Prevent default behavior
-  event.preventDefault();
-  event.stopPropagation();
-  
-  // Get the movement delta - positive when moving left (making panel wider)
-  const deltaX = resizeStartX.value - event.clientX;
-  
-  // Calculate direct conversion to percentage - using parent container width
-  const parentWidth = parentRowRef.value?.offsetWidth || window.innerWidth;
-  const deltaPercent = (deltaX / parentWidth) * 100;
-  
-  // Calculate new basis value - original percentage + delta
-  let newBasis = initialChatPanelBasis.value + deltaPercent;
-  
-  // Calculate minimum width based on drop zone size to prevent panel from disappearing
-  // As drop zone gets wider, we need to ensure chat panel has a reasonable minimum width
-  const minWidthPx = 250; // Absolute minimum width in pixels
-  let minWidthPercent = 15; // Default minimum percentage
-  
-  if (dropZoneWidth.value && dropZoneWidth.value > 800) {
-    // For wider drop zones, calculate a higher minimum percentage
-    // This ensures the chat panel stays visible even with wide drop zones
-    const minPercentForCurrentWidth = (minWidthPx / parentWidth) * 100;
-    minWidthPercent = Math.max(minWidthPercent, minPercentForCurrentWidth);
-  }
-  
-  // Clamp the value to reasonable boundaries
-  // The maximum is still 50% but minimum is now dynamic based on drop zone width
-  newBasis = Math.max(minWidthPercent, Math.min(newBasis, 50));
-  
-  // Apply the new width percentage
-  chatPanelFlexBasis.value = `${newBasis}%`;
-  mainContentFlexBasis.value = `${100 - newBasis}%`;
-};
-
-const handleResizeMouseUp = () => {
-  // Clean up - reset flags and styles
-  isResizingChatPanel.value = false;
-  document.body.style.cursor = '';
-  document.body.style.userSelect = '';
-  
-  // Remove the event listeners
-  document.removeEventListener('mousemove', handleResizeMouseMove);
-  document.removeEventListener('mouseup', handleResizeMouseUp);
 };
 
 const getImageOverlayStyles = (overlay: ImageOverlay) => {
@@ -4680,33 +2367,6 @@ const getChatStyles = (overlay: ChatOverlay) => {
     outlineOffset: '2px',
     zIndex: 300 + Math.max(overlayIndex, 0)
   };
-};
-
-const buildMaskedImageOverlayCanvas = async (overlay: ImageOverlay) => {
-  const sourceImage = await loadOverlaySourceImage(overlay.src);
-  syncImageOverlayIntrinsicSize(overlay, sourceImage.naturalWidth, sourceImage.naturalHeight);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = overlay.sourceWidth || sourceImage.naturalWidth;
-  canvas.height = overlay.sourceHeight || sourceImage.naturalHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    return null;
-  }
-
-  ctx.drawImage(sourceImage, 0, 0, canvas.width, canvas.height);
-
-  const maskCanvas = imageOverlayMaskCanvasMap.get(overlay.id)
-    ?? (overlay.maskDataUrl ? await hydrateImageOverlayMaskCanvas(overlay) : null);
-
-  if (maskCanvas) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'destination-in';
-    ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height);
-    ctx.restore();
-  }
-
-  return canvas;
 };
 
 const effectAwareImageOverlays = computed(() => {
@@ -5027,212 +2687,56 @@ const selectedText = reactive({
 
 // Add a key to force re-render when censoring changes
 const renderKey = ref(0);
-
-const getChatlogTextareaElement = () =>
-  document.querySelector('.chatlog-textarea textarea') as HTMLTextAreaElement | null;
-
-const getCensorTypeLabel = (type: CensorType) => {
-  switch (type) {
-    case CensorType.Invisible:
-      return 'Invisible';
-    case CensorType.BlackBar:
-      return 'Black Bar';
-    case CensorType.Blur:
-      return 'Blur';
-    default:
-      return 'None';
-  }
-};
-
-const buildRegionId = (region: CensoredRegion) =>
-  `${region.lineIndex}:${region.startOffset}:${region.endOffset}`;
-
-const getLineTextForRegion = (overlay: ChatOverlay, lineIndex: number) => {
-  const rawLines = overlay.rawText.split('\n');
-  return getDisplayedLineText(rawLines[lineIndex] ?? '');
-};
-
-const getRegionPreviewText = (overlay: ChatOverlay, region: CensoredRegion) => {
-  const lineText = getLineTextForRegion(overlay, region.lineIndex);
-  const start = Math.max(0, Math.min(lineText.length, region.startOffset));
-  const end = Math.max(start, Math.min(lineText.length, region.endOffset));
-
-  return lineText.slice(start, end).trim() || '(Whitespace selection)';
-};
-
-const activeCensoredRegionSummaries = computed<CensoredRegionSummary[]>(() => {
-  if (!activeChatOverlay.value) return [];
-
-  return [...activeChatOverlay.value.censoredRegions]
-    .sort((a, b) =>
-      a.lineIndex - b.lineIndex ||
-      a.startOffset - b.startOffset ||
-      a.endOffset - b.endOffset
-    )
-    .map((region) => {
-      const lineText = getLineTextForRegion(activeChatOverlay.value!, region.lineIndex);
-      return {
-        ...region,
-        id: buildRegionId(region),
-        label: `Line ${region.lineIndex + 1} · ${getCensorTypeLabel(region.type)}`,
-        preview: getRegionPreviewText(activeChatOverlay.value!, region),
-        lineText
-      };
-    });
+const {
+  activeCensoredRegionSummaries,
+  applyCensorType,
+  applyManualColorOverride,
+  buildStyledLineHtml,
+  clearCensorType,
+  clearChatlog,
+  collapseStyledCharacters,
+  duplicateChatOverlay: duplicateChatOverlayBase,
+  focusCensoredRegion,
+  getStyledCharacters,
+  handleTextSelection,
+  isRegionSelected,
+  openColorDialog,
+  parseChatText,
+  parseChatlog,
+  removeCensoredRegion,
+  removeChatOverlay,
+  removeManualColorOverride,
+  reparseChatOverlays,
+  selectChatOverlay,
+  startNewChatLayer,
+  syncEditorFromActiveOverlay,
+  toggleChatOverlayLock,
+  toggleChatOverlayVisibility
+} = useMagicianChatLayers({
+  activeChatOverlay,
+  activeChatOverlayId,
+  characterName,
+  chatLineWidth,
+  chatOverlays,
+  chatlogText,
+  createDefaultChatTransform,
+  createOverlayId,
+  getAnalyticsContext,
+  getChatOverlayName,
+  nextTick: () => nextTick(),
+  onLockedActiveOverlay: () => {
+    if (isChatPanning.value) {
+      handleChatMouseUpOrLeave();
+    }
+  },
+  renderKey,
+  selectedText,
+  showColorDialog,
+  trackEvent
 });
 
-const isRegionSelected = (region: CensoredRegion) =>
-  selectedText.lineIndex === region.lineIndex &&
-  selectedText.startOffset === region.startOffset &&
-  selectedText.endOffset === region.endOffset;
-
-const removeCensoredRegion = (region: CensoredRegion) => {
-  if (!activeChatOverlay.value) return;
-
-  const regionIndex = activeChatOverlay.value.censoredRegions.findIndex((candidate) =>
-    candidate.lineIndex === region.lineIndex &&
-    candidate.startOffset === region.startOffset &&
-    candidate.endOffset === region.endOffset
-  );
-
-  if (regionIndex === -1) return;
-
-  activeChatOverlay.value.censoredRegions.splice(regionIndex, 1);
-
-  if (isRegionSelected(region)) {
-    selectedText.lineIndex = -1;
-    selectedText.startOffset = 0;
-    selectedText.endOffset = 0;
-    selectedText.text = '';
-  }
-
-  renderKey.value++;
-};
-
-const focusCensoredRegion = async (region: CensoredRegion) => {
-  if (!activeChatOverlay.value) return;
-
-  if (activeChatOverlay.value.rawText !== chatlogText.value) {
-    syncEditorFromActiveOverlay();
-  }
-
-  await nextTick();
-
-  const textarea = getChatlogTextareaElement();
-  if (!textarea) return;
-
-  const rawLines = textarea.value.split('\n');
-  const lineText = rawLines[region.lineIndex] ?? '';
-  const timestampPrefixLength = getTimestampPrefixLength(lineText);
-  const safeStartOffset = Math.max(0, Math.min(getDisplayedLineText(lineText).length, region.startOffset));
-  const safeEndOffset = Math.max(safeStartOffset, Math.min(getDisplayedLineText(lineText).length, region.endOffset));
-  const lineStartOffset = rawLines
-    .slice(0, region.lineIndex)
-    .reduce((total, line) => total + line.length + 1, 0);
-  const selectionStart = lineStartOffset + timestampPrefixLength + safeStartOffset;
-  const selectionEnd = lineStartOffset + timestampPrefixLength + safeEndOffset;
-
-  textarea.focus();
-  textarea.setSelectionRange(selectionStart, selectionEnd);
-
-  selectedText.lineIndex = region.lineIndex;
-  selectedText.startOffset = safeStartOffset;
-  selectedText.endOffset = safeEndOffset;
-  selectedText.text = getRegionPreviewText(activeChatOverlay.value, region);
-};
-
-const getSelectedCensorRegionIndex = () => {
-  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
-  return activeChatOverlay.value.censoredRegions.findIndex(
-    (region) => region.lineIndex === selectedText.lineIndex &&
-      region.startOffset === selectedText.startOffset &&
-      region.endOffset === selectedText.endOffset
-  );
-};
-
-const applyCensorType = (type: CensorType) => {
-  if (selectedText.lineIndex === -1 || !activeChatOverlay.value || type === CensorType.None) return;
-
-  const existingIndex = getSelectedCensorRegionIndex();
-
-  if (existingIndex === undefined || existingIndex === -1) {
-    activeChatOverlay.value.censoredRegions.push({
-      lineIndex: selectedText.lineIndex,
-      startOffset: selectedText.startOffset,
-      endOffset: selectedText.endOffset,
-      type
-    });
-  } else {
-    activeChatOverlay.value.censoredRegions[existingIndex].type = type;
-  }
-
-  trackEvent('apply_censor', {
-    censor_type: type,
-    selection_length: Math.max(0, selectedText.endOffset - selectedText.startOffset),
-    line_index: selectedText.lineIndex,
-    ...getAnalyticsContext()
-  });
-
-  renderKey.value++;
-};
-
-const clearCensorType = () => {
-  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
-
-  const existingIndex = getSelectedCensorRegionIndex();
-  if (existingIndex === undefined || existingIndex === -1) return;
-
-  activeChatOverlay.value.censoredRegions.splice(existingIndex, 1);
-  trackEvent('remove_censor', {
-    selection_length: Math.max(0, selectedText.endOffset - selectedText.startOffset),
-    line_index: selectedText.lineIndex,
-    ...getAnalyticsContext()
-  });
-  renderKey.value++;
-};
-
-const openColorDialog = () => {
-  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
-  showColorDialog.value = true;
-};
-
-const applyManualColorOverride = (color: string) => {
-  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
-
-  const existingIndex = activeChatOverlay.value.manualColorRegions.findIndex((region) =>
-    region.lineIndex === selectedText.lineIndex &&
-    region.startOffset === selectedText.startOffset &&
-    region.endOffset === selectedText.endOffset
-  );
-
-  if (existingIndex === -1) {
-    activeChatOverlay.value.manualColorRegions.push({
-      lineIndex: selectedText.lineIndex,
-      startOffset: selectedText.startOffset,
-      endOffset: selectedText.endOffset,
-      color
-    });
-  } else {
-    activeChatOverlay.value.manualColorRegions[existingIndex].color = color;
-  }
-
-  showColorDialog.value = false;
-  renderKey.value++;
-};
-
-const removeManualColorOverride = () => {
-  if (selectedText.lineIndex === -1 || !activeChatOverlay.value) return;
-
-  activeChatOverlay.value.manualColorRegions = activeChatOverlay.value.manualColorRegions.filter((region) =>
-    !(
-      region.lineIndex === selectedText.lineIndex &&
-      region.startOffset < selectedText.endOffset &&
-      region.endOffset > selectedText.startOffset
-    )
-  );
-
-  showColorDialog.value = false;
-  renderKey.value++;
+const duplicateChatOverlay = (overlayId: string) => {
+  duplicateChatOverlayBase(cloneChatOverlay, overlayId);
 };
 
 const addCustomColorSwatch = () => {
@@ -5243,117 +2747,23 @@ const addCustomColorSwatch = () => {
   saveCustomColorSwatches();
 };
 
-// Update handleTextSelection to work with textarea
-const handleTextSelection = () => {
-  const selection = window.getSelection();
-  
-  if (!selection || selection.toString().trim() === '') {
-    selectedText.lineIndex = -1;
-    return;
-  }
+const sessionPersistence = useMagicianSessionPersistence({
+  applyEditorSnapshot,
+  createDefaultChatTransform,
+  createOverlayId,
+  currentProjectId,
+  currentProjectName,
+  getChatOverlayName,
+  parseChatText,
+  toSerializableSnapshot
+});
 
-  try {
-    // Get the textarea element
-    const textarea = getChatlogTextareaElement();
-    if (!textarea) return;
-
-    const selectedValue = selection.toString().trim();
-    const fullText = textarea.value;
-    const lines = fullText.split('\n');
-    
-    // Find which line contains the selection
-    let currentPos = 0;
-    for (let i = 0; i < lines.length; i++) {
-      const lineLength = lines[i].length + 1; // +1 for newline
-      const lineStart = currentPos;
-      const lineEnd = currentPos + lineLength;
-      
-      // Check if selection is in this line
-      const selectionStart = textarea.selectionStart;
-      if (selectionStart >= lineStart && selectionStart < lineEnd) {
-        const rawStartOffset = selectionStart - lineStart;
-        const rawEndOffset = textarea.selectionEnd - lineStart;
-        const displayedSelection = getDisplayedSelectionRange(lines[i], rawStartOffset, rawEndOffset);
-
-        selectedText.lineIndex = i;
-        selectedText.startOffset = Math.min(displayedSelection.startOffset, displayedSelection.displayedLine.length);
-        selectedText.endOffset = Math.min(displayedSelection.endOffset, displayedSelection.displayedLine.length);
-        selectedText.text = selectedValue;
-        break;
-      }
-      
-      currentPos += lineLength;
-    }
-  } catch (error) {
-    console.error('Error handling text selection:', error);
-  }
+const saveEditorState = async (snapshot: EditorStateSnapshot = createEditorSnapshot()) => {
+  await sessionPersistence.saveEditorState(snapshot);
 };
 
-// Save editor state to cookie
-const saveEditorState = (snapshot: EditorStateSnapshot = createEditorSnapshot()) => {
-  if (typeof window === 'undefined') return;
-
-  const state: PersistedEditorSession = {
-    snapshot: toSerializableSnapshot(snapshot),
-    currentProjectId: currentProjectId.value,
-    currentProjectName: currentProjectName.value
-  };
-
-  try {
-    window.localStorage.setItem(EDITOR_STATE_STORAGE_KEY, JSON.stringify(state));
-  } catch (error) {
-    console.error('Error saving editor state:', error);
-  }
-};
-
-// Load editor state from cookie
-const loadEditorState = () => {
-  if (typeof window === 'undefined') return;
-
-  const savedState = window.localStorage.getItem(EDITOR_STATE_STORAGE_KEY) || Cookies.get('editorState');
-  if (savedState) {
-    try {
-      const parsedState = JSON.parse(savedState) as Partial<PersistedEditorSession & EditorStateSnapshot>;
-      const state = parsedState.snapshot ?? parsedState;
-
-      if (!Array.isArray(state.chatOverlays) && state.chatlogText) {
-        const migratedOverlay: ChatOverlay = {
-          id: createOverlayId(),
-          name: getChatOverlayName(state.chatlogText, 0),
-          rawText: state.chatlogText,
-          parsedLines: parseChatText(state.chatlogText),
-          transform: {
-            ...createDefaultChatTransform(),
-            ...(state.chatTransform || {})
-          },
-          censoredRegions: Array.isArray(state.censoredRegions) ? state.censoredRegions : [],
-          manualColorRegions: [],
-          lineWidth: state.chatLineWidth || DEFAULT_CHAT_LINE_WIDTH,
-          isHidden: false,
-          isLocked: false
-        };
-
-        applyEditorSnapshot({
-          ...state,
-          chatOverlays: [migratedOverlay],
-          activeChatOverlayId: migratedOverlay.id
-        });
-        currentProjectId.value = typeof parsedState.currentProjectId === 'string' ? parsedState.currentProjectId : null;
-        currentProjectName.value = typeof parsedState.currentProjectName === 'string' ? parsedState.currentProjectName : '';
-        saveEditorState();
-        Cookies.remove('editorState');
-        return;
-      }
-
-      applyEditorSnapshot(state);
-      currentProjectId.value = typeof parsedState.currentProjectId === 'string' ? parsedState.currentProjectId : null;
-      currentProjectName.value = typeof parsedState.currentProjectName === 'string' ? parsedState.currentProjectName : '';
-      saveEditorState();
-      Cookies.remove('editorState');
-    } catch (error) {
-      console.error('Error loading editor state:', error);
-    }
-  }
+const loadEditorState = async () => {
+  await sessionPersistence.loadEditorState(saveEditorState);
 };
 
 // Load character name from cookie
@@ -5443,7 +2853,7 @@ const scheduleEditorStatePersist = () => {
 
   editorStatePersistTimer = setTimeout(() => {
     editorStatePersistTimer = null;
-    saveEditorState();
+    void saveEditorState();
   }, 250);
 };
 
@@ -5488,7 +2898,7 @@ watch(
 );
 
 // Load saved state when component mounts
-onMounted(() => {
+onMounted(async () => {
   unsavedNavigationStore.setEditorMounted(true);
   window.addEventListener('beforeunload', handleBeforeUnload);
   window.addEventListener('keydown', handleEditorHistoryKeydown);
@@ -5498,7 +2908,7 @@ onMounted(() => {
   loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
-  loadEditorState();
+  await loadEditorState();
   markCurrentStateAsSaved();
   resetHistoryState();
   refreshProjectList();
@@ -5518,6 +2928,9 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (applyHistoryStateTimer) {
+    clearTimeout(applyHistoryStateTimer);
+  }
   if (historyCommitTimer) {
     clearTimeout(historyCommitTimer);
   }
@@ -5530,16 +2943,8 @@ onUnmounted(() => {
   if (dropzoneScaleAnimationFrame !== null) {
     window.cancelAnimationFrame(dropzoneScaleAnimationFrame);
   }
-  if (imageDragAnimationFrame !== null) {
-    window.cancelAnimationFrame(imageDragAnimationFrame);
-  }
-  if (chatDragAnimationFrame !== null) {
-    window.cancelAnimationFrame(chatDragAnimationFrame);
-  }
-  imageOverlayMaskSerializeTimers.forEach((timer) => clearTimeout(timer));
-  imageOverlayMaskSerializeTimers.clear();
-  imageOverlayMaskCanvasMap.clear();
-  activeCanvasDragCleanup?.();
+  disposeCanvasInteraction();
+  disposeImageOverlayRuntime();
   window.removeEventListener('beforeunload', handleBeforeUnload);
   window.removeEventListener('keydown', handleEditorHistoryKeydown);
   window.removeEventListener('keyup', handleEditorHistoryKeyup);
@@ -5547,7 +2952,6 @@ onUnmounted(() => {
     window.removeEventListener('resize', windowResizeHandler);
   }
   unsavedNavigationStore.reset();
-  handleChatMouseUpOrLeave();
 });
 
 watch(hasUnsavedChanges, (value) => {
@@ -5659,207 +3063,52 @@ watch(chatLineWidth, (newValue) => {
   renderKey.value++;
 });
 
-const openProjectsManager = async () => {
-  showProjectsDialog.value = true;
-  await refreshProjectList();
-};
-
-const closeSaveProjectDialog = () => {
-  showSaveProjectDialog.value = false;
-  pendingEditorAction.value = null;
-};
-
 const closePendingEditorAction = () => {
   showUnsavedChangesDialog.value = false;
   pendingEditorAction.value = null;
 };
 
-const requestEditorAction = async (action: PendingEditorAction) => {
-  if (hasUnsavedChanges.value) {
-    pendingEditorAction.value = action;
-    showUnsavedChangesDialog.value = true;
-    return;
-  }
-
-  if (action.type === 'new-session') {
+const {
+  closeDeleteProjectDialog,
+  closeSaveProjectDialog,
+  confirmDeleteProject,
+  discardAndContinuePendingAction,
+  loadProject,
+  openProjectsManager,
+  promptSaveProject,
+  refreshProjectList,
+  requestDeleteProject,
+  requestEditorAction,
+  saveAndContinuePendingAction,
+  saveCurrentProject,
+  saveProject
+} = useMagicianProjects({
+  autosaveState,
+  closePendingEditorAction,
+  createEditorSnapshot,
+  createProjectId,
+  currentProjectId,
+  currentProjectName,
+  getAnalyticsContext,
+  hasUnsavedChanges,
+  isProjectsLoading,
+  markCurrentStateAsSaved,
+  openNewSessionDialog: () => {
     showNewSessionDialog.value = true;
-    return;
-  }
-
-  if (action.type === 'load-project' && action.projectId) {
-    await loadProject(action.projectId, { bypassUnsavedCheck: true });
-  }
-};
-
-const saveAndContinuePendingAction = async () => {
-  if (!pendingEditorAction.value) return;
-
-  if (!currentProjectId.value) {
-    pendingProjectName.value = currentProjectName.value || `Project ${projectRecords.value.length + 1}`;
-    showUnsavedChangesDialog.value = false;
-    showSaveProjectDialog.value = true;
-    return;
-  }
-
-  pendingProjectName.value = currentProjectName.value;
-  await saveProject();
-};
-
-const discardAndContinuePendingAction = async () => {
-  const action = pendingEditorAction.value;
-  closePendingEditorAction();
-  if (!action) return;
-
-  if (action.type === 'new-session') {
-    resetSession();
-    return;
-  }
-
-  if (action.type === 'load-project' && action.projectId) {
-    await loadProject(action.projectId, { bypassUnsavedCheck: true });
-  }
-};
-
-const promptSaveProject = () => {
-  pendingProjectName.value = currentProjectName.value || `Project ${projectRecords.value.length + 1}`;
-  showSaveProjectDialog.value = true;
-};
-
-const saveProject = async (options: SaveProjectOptions = {}) => {
-  const {
-    forceNewProject = false,
-    autosave = false,
-    refreshProjectList: shouldRefreshProjectList = true
-  } = options;
-
-  const trimmedName = autosave
-    ? currentProjectName.value.trim()
-    : pendingProjectName.value.trim();
-  if (!trimmedName) return false;
-
-  const now = new Date().toISOString();
-  const hadExistingProject = Boolean(currentProjectId.value);
-  const projectId = forceNewProject || !currentProjectId.value ? createProjectId() : currentProjectId.value;
-  const existingCreatedAt = forceNewProject || !currentProjectId.value
-    ? now
-    : projectRecords.value.find((project) => project.id === currentProjectId.value)?.createdAt || now;
-
-  const projectRecord: ProjectRecord = {
-    id: projectId,
-    name: trimmedName,
-    createdAt: existingCreatedAt,
-    updatedAt: now,
-    snapshot: toSerializableSnapshot(createEditorSnapshot())
-  };
-
-  try {
-    autosaveState.value = autosave ? 'saving' : autosaveState.value;
-    await saveStoredProject(projectRecord);
-    currentProjectId.value = projectRecord.id;
-    currentProjectName.value = projectRecord.name;
-    markCurrentStateAsSaved(projectRecord.snapshot);
-
-    if (autosave) {
-      autosaveState.value = 'saved';
-    } else {
-      autosaveState.value = 'idle';
-      trackEvent('save_project', {
-        save_mode: forceNewProject ? 'save_as_new' : hadExistingProject ? 'overwrite' : 'create',
-        had_existing_project: hadExistingProject,
-        ...getAnalyticsContext()
-      });
-      showSaveProjectDialog.value = false;
-      if (shouldRefreshProjectList) {
-        await refreshProjectList();
-      }
-
-      if (pendingEditorAction.value) {
-        const action = pendingEditorAction.value;
-        closePendingEditorAction();
-
-        if (action.type === 'new-session') {
-          resetSession();
-        } else if (action.type === 'load-project' && action.projectId) {
-          await loadProject(action.projectId, { bypassUnsavedCheck: true });
-        }
-      }
-    }
-
-    return true;
-  } catch (error) {
-    autosaveState.value = autosave ? 'error' : autosaveState.value;
-    console.error('Error saving project:', error);
-    return false;
-  }
-};
-
-const loadProject = async (projectId: string, options?: { bypassUnsavedCheck?: boolean }) => {
-  if (!options?.bypassUnsavedCheck && hasUnsavedChanges.value) {
-    pendingEditorAction.value = { type: 'load-project', projectId };
-    showUnsavedChangesDialog.value = true;
-    return;
-  }
-
-  try {
-    const project = await loadStoredProject(projectId);
-    if (!project) return;
-
-    applyEditorSnapshot(project.snapshot);
-    currentProjectId.value = project.id;
-    currentProjectName.value = project.name;
-    markCurrentStateAsSaved(project.snapshot);
-    trackEvent('load_project', {
-      ...getAnalyticsContext(),
-      loaded_chat_layers_count: project.snapshot.chatOverlays?.filter((overlay) => overlay.parsedLines?.length > 0).length || 0,
-      loaded_has_image: Boolean(project.snapshot.droppedImageSrc)
-    });
-    closePendingEditorAction();
-    showProjectsDialog.value = false;
-  } catch (error) {
-    console.error('Error loading project:', error);
-  }
-};
-
-const saveCurrentProject = async () => {
-  if (!currentProjectId.value) {
-    promptSaveProject();
-    return;
-  }
-
-  pendingProjectName.value = currentProjectName.value;
-  await saveProject();
-};
-
-const deleteProject = async (projectId: string) => {
-  try {
-    await deleteStoredProject(projectId);
-    if (currentProjectId.value === projectId) {
-      currentProjectId.value = null;
-      currentProjectName.value = '';
-    }
-    await refreshProjectList();
-  } catch (error) {
-    console.error('Error deleting project:', error);
-  }
-};
-
-const requestDeleteProject = (projectId: string, projectName: string) => {
-  pendingProjectDelete.value = { id: projectId, name: projectName };
-  showDeleteProjectDialog.value = true;
-};
-
-const closeDeleteProjectDialog = () => {
-  showDeleteProjectDialog.value = false;
-  pendingProjectDelete.value = null;
-};
-
-const confirmDeleteProject = async () => {
-  const targetProject = pendingProjectDelete.value;
-  if (!targetProject) return;
-
-  await deleteProject(targetProject.id);
-  closeDeleteProjectDialog();
-};
+  },
+  pendingEditorAction,
+  pendingProjectDelete,
+  pendingProjectName,
+  projectRecords,
+  resetSession,
+  showDeleteProjectDialog,
+  showProjectsDialog,
+  showSaveProjectDialog,
+  showUnsavedChangesDialog,
+  toSerializableSnapshot,
+  trackEvent,
+  applyEditorSnapshot
+});
 
 // Add this new method to handle the click on drop zone
 const handleDropZoneClick = () => {
