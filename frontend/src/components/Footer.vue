@@ -7,11 +7,52 @@ defineOptions({
 });
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.28-beta';
+const version = 'v2.0.30-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.30-beta',
+        date: 'APR-22-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added a lightweight live stats backend to track unique visitors, active users, image exports, total visits, and unique exporters',
+                    'Added a new Live Community Tracker section on the home page with automatically refreshed usage metrics',
+                    'Added Docker and Portainer deployment support for running the stats backend separately from the static frontend'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Connected frontend session starts, activity heartbeats, and successful image exports to the backend stats service',
+                    'Made backend CORS configurable so the stats service can be safely exposed from its own VPS subdomain'
+                ]
+            }
+        ]
+    },
+    {
+        version: 'v2.0.29-beta',
+        date: 'APR-22-2026',
+        changes: [
+            {
+                type: 'improved',
+                items: [
+                    'Refactored the Screenshot Magician editor into a more modular feature structure under frontend/src/features/magician/',
+                    'Split shared editor types, constants, content, theme config, image effect presets, and chat color mappings out of Magician.vue',
+                    'Moved theme management, project persistence, session persistence, chat layer behavior, image overlay runtime behavior, and canvas interaction logic into dedicated composables and helpers'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Resolved refactor-related TypeScript and ESLint issues and kept type-check and production builds passing through the modularization work'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.28-beta',
         date: 'APR-21-2026',
