@@ -7,6 +7,7 @@ import { useDisplay, useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
 import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useAnalytics } from '@/composables/useAnalytics';
+import { recordImageExport } from '@/composables/useLiveStats';
 import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
 import {
   CensorType,
@@ -2620,6 +2621,7 @@ const saveImage = async () => {
         export_format: 'png',
         ...getAnalyticsContext()
       });
+      void recordImageExport();
     }, 'image/png');
 
   } catch (error) {

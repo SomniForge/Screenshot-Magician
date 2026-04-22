@@ -5,6 +5,7 @@ import { onMounted, onUnmounted } from 'vue';
 import { RouterView } from 'vue-router'
 import SideBar from '@/components/SideBar.vue';
 import Footer from '@/components/Footer.vue';
+import { disposeLiveStatsTracking, initializeLiveStatsTracking } from '@/composables/useLiveStats';
 import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
 
 const unsavedNavigationStore = useUnsavedNavigationStore();
@@ -38,10 +39,12 @@ const handleDocumentClick = (event: MouseEvent) => {
 
 onMounted(() => {
   document.addEventListener('click', handleDocumentClick, true);
+  void initializeLiveStatsTracking();
 });
 
 onUnmounted(() => {
   document.removeEventListener('click', handleDocumentClick, true);
+  disposeLiveStatsTracking();
 });
 </script>
 

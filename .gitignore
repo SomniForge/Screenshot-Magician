@@ -52,3 +52,4 @@ coverage/
 frontend/public/ads.txt
 DOMAIN_CUTOVER.md
 CHANGELOG.md
+backend/data/

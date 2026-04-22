@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import AdSlot from '@/components/AdSlot.vue';
 import { useAdPreferences } from '@/composables/useAdPreferences';
+import { useLiveStatsSummary } from '@/composables/useLiveStats';
 
 const features = [
   {
@@ -49,6 +50,51 @@ const timeComparison = [
 ];
 
 const { showAds } = useAdPreferences();
+const { summary, hasSummaryError } = useLiveStatsSummary();
+
+const liveStatCards = [
+  {
+    title: 'All-Time Unique Users',
+    value: () => summary.value.uniqueUsers,
+    icon: 'mdi-account-group',
+    tone: 'primary',
+    caption: 'Unique browser visitors seen by the app'
+  },
+  {
+    title: 'Images Exported',
+    value: () => summary.value.imagesExported,
+    icon: 'mdi-image-multiple',
+    tone: 'success',
+    caption: 'Successful PNG exports recorded from the editor'
+  },
+  {
+    title: 'Active Right Now',
+    value: () => summary.value.activeUsers,
+    icon: 'mdi-access-point',
+    tone: 'info',
+    caption: 'Visitors active within the last two minutes'
+  },
+  {
+    title: 'Unique Exporters',
+    value: () => summary.value.uniqueExporters,
+    icon: 'mdi-tray-arrow-up',
+    tone: 'warning',
+    caption: 'Visitors who have exported at least one image'
+  }
+];
+
+const interestingStatCards = [
+  {
+    title: 'Total Visits',
+    value: () => summary.value.totalVisits,
+    detail: 'Every tracked app session start'
+  },
+  {
+    title: 'Avg Exports / User',
+    value: () => summary.value.averageExportsPerUser,
+    detail: 'Images exported divided by unique users'
+  }
+];
 </script>
 
 <template>
@@ -125,6 +171,77 @@ const { showAds } = useAdPreferences();
             </v-hover>
           </v-col>
         </v-row>
+      </v-container>
+    </section>
+
+    <section class="stats-section">
+      <v-container class="py-16">
+        <v-row align="end" class="mb-6">
+          <v-col cols="12" md="8">
+            <h2 class="text-h4 font-weight-bold mb-3">Live Community Tracker</h2>
+            <p class="text-medium-emphasis mb-0">
+              Real usage pulled from the app backend and refreshed automatically.
+            </p>
+          </v-col>
+          <v-col cols="12" md="4" class="text-md-right">
+            <span class="stats-updated text-medium-emphasis">
+              Updated {{ new Date(summary.updatedAt).toLocaleTimeString() }}
+            </span>
+          </v-col>
+        </v-row>
+
+        <v-row class="mb-6">
+          <v-col
+            v-for="stat in liveStatCards"
+            :key="stat.title"
+            cols="12"
+            sm="6"
+            md="3"
+          >
+            <v-card class="stats-card" rounded="xl">
+              <v-card-item>
+                <template #prepend>
+                  <v-avatar :color="stat.tone" variant="tonal" size="44">
+                    <v-icon :icon="stat.icon" />
+                  </v-avatar>
+                </template>
+                <v-card-subtitle>{{ stat.title }}</v-card-subtitle>
+                <v-card-title class="text-h4 mt-2">{{ stat.value().toLocaleString() }}</v-card-title>
+                <v-card-text class="text-medium-emphasis">
+                  {{ stat.caption }}
+                </v-card-text>
+              </v-card-item>
+            </v-card>
+          </v-col>
+        </v-row>
+
+        <v-row>
+          <v-col
+            v-for="stat in interestingStatCards"
+            :key="stat.title"
+            cols="12"
+            md="6"
+          >
+            <v-card class="stats-card stats-card--compact" rounded="xl">
+              <v-card-item>
+                <v-card-subtitle>{{ stat.title }}</v-card-subtitle>
+                <v-card-title class="text-h4 mt-2">{{ stat.value().toLocaleString() }}</v-card-title>
+                <v-card-text class="text-medium-emphasis">
+                  {{ stat.detail }}
+                </v-card-text>
+              </v-card-item>
+            </v-card>
+          </v-col>
+        </v-row>
+
+        <v-alert
+          v-if="hasSummaryError"
+          class="mt-6"
+          type="warning"
+          variant="tonal"
+          title="Tracker offline"
+          text="The live tracker needs the backend running to populate these numbers."
+        />
       </v-container>
     </section>
 
@@ -244,6 +361,26 @@ const { showAds } = useAdPreferences();
   background-color: var(--home-surface);
   border: 1px solid var(--home-border);
   color: var(--home-text) !important;
+}
+
+.stats-card {
+  background:
+    linear-gradient(160deg, rgba(66, 165, 245, 0.12), rgba(171, 71, 188, 0.06)),
+    var(--home-surface);
+  border: 1px solid var(--home-border);
+  color: var(--home-text) !important;
+  height: 100%;
+}
+
+.stats-card--compact {
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01)),
+    var(--home-surface);
+}
+
+.stats-updated {
+  display: inline-block;
+  padding-top: 8px;
 }
 
 .feature-card.on-hover {
