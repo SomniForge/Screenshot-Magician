@@ -7,11 +7,40 @@ defineOptions({
 });
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.30-beta';
+const version = 'v2.0.31-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.31-beta',
+        date: 'APR-22-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added direct ImgBB upload support with local API key storage, automatic direct-link copying, and a dedicated Image Hosting settings section',
+                    'Added public testimonials with backend storage, a homepage review feed, and an in-page review submission form',
+                    'Added post-export and post-upload sharing prompts with copyable app links, share snippets, native sharing support, and an opt-out toggle in Settings'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved editor error handling so import, export, project, and session failures now show clear in-app notifications instead of disappearing into the console',
+                    'Reworked the home page layout to bring reviews and usage proof above the fold with a trust strip, featured testimonial teaser, and a lower in-flow support block',
+                    'Updated the live stats timestamp label so it reflects the last successful frontend refresh time'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Simplified testimonials to use Username only and removed the extra server or role field from the UI and backend model',
+                    'Fixed the share prompt opt-out flow so it only stays hidden when the user explicitly disables it'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.30-beta',
         date: 'APR-22-2026',

@@ -30,6 +30,7 @@ let heartbeatTimer: number | null = null;
 const summary = ref<LiveStatsSummary>({ ...DEFAULT_SUMMARY });
 const isLoadingSummary = ref(false);
 const hasSummaryError = ref(false);
+const lastSummaryRefreshAt = ref(new Date(0).toISOString());
 
 const getApiBaseUrl = () => {
   const configuredBaseUrl = import.meta.env.VITE_STATS_API_BASE_URL?.trim();
@@ -103,6 +104,7 @@ const fetchSummary = async () => {
     }
 
     summary.value = await response.json() as LiveStatsSummary;
+    lastSummaryRefreshAt.value = new Date().toISOString();
     hasSummaryError.value = false;
   } catch (error) {
     hasSummaryError.value = true;
@@ -193,6 +195,7 @@ export const useLiveStatsSummary = () => {
     summary,
     isLoadingSummary,
     hasSummaryError,
+    lastSummaryRefreshAt,
     refreshSummary: fetchSummary
   };
 };

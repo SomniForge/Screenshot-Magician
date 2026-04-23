@@ -7,6 +7,7 @@ import { useDisplay, useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
 import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useAnalytics } from '@/composables/useAnalytics';
+import { copyTextToClipboard, uploadImageToImgBb } from '@/composables/useImageHosting';
 import { recordImageExport } from '@/composables/useLiveStats';
 import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
 import {
@@ -36,6 +37,8 @@ import {
   MAX_IMAGE_MASK_BRUSH_SIZE,
   MIN_IMAGE_MASK_BRUSH_SIZE,
   PROJECT_AUTOSAVE_DELAY_MS,
+  IMAGE_HOSTING_IMGBB_API_KEY_STORAGE_KEY,
+  SHARE_PROMPT_ENABLED_STORAGE_KEY,
   SHOW_NAVIGATOR_STORAGE_KEY,
   SMART_GUIDES_ENABLED_STORAGE_KEY,
   SMART_GUIDE_STRENGTH_STORAGE_KEY,
@@ -117,6 +120,17 @@ const customColorSwatches = ref<string[]>([]);
 const imageEffects = ref<ImageEffectLayer[]>([]);
 const dontShowTutorialAgain = ref(false);
 const tutorialStepIndex = ref(0);
+const imageHostImgBbApiKey = ref('');
+const isImageHostUploadInProgress = ref(false);
+const lastUploadedImageUrl = ref('');
+const showShareDialog = ref(false);
+const sharePromptContext = ref<'export' | 'upload'>('export');
+const shareSnippetStyle = ref<'short' | 'casual' | 'forum'>('casual');
+const sharePromptEnabled = ref(true);
+const disableSharePromptOnClose = ref(false);
+const editorNoticeVisible = ref(false);
+const editorNoticeMessage = ref('');
+const editorNoticeTone = ref<'error' | 'success' | 'info'>('error');
 const vuetifyTheme = useTheme();
 const {
   activeEditorThemeId,
@@ -1832,6 +1846,103 @@ const pendingActionDescription = computed(() => {
 });
 
 const isCompactToolbar = computed(() => viewportWidth.value < 1400);
+const editorNoticeIcon = computed(() => {
+  if (editorNoticeTone.value === 'success') return 'mdi-check-circle-outline';
+  if (editorNoticeTone.value === 'info') return 'mdi-information-outline';
+  return 'mdi-alert-circle-outline';
+});
+
+const getErrorDetails = (error: unknown) => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim();
+  }
+
+  return '';
+};
+
+const showEditorNotice = (
+  message: string,
+  tone: 'error' | 'success' | 'info' = 'error'
+) => {
+  editorNoticeMessage.value = message;
+  editorNoticeTone.value = tone;
+  editorNoticeVisible.value = true;
+};
+
+const reportError = (message: string, error?: unknown) => {
+  const details = getErrorDetails(error);
+  console.error(message, error);
+  showEditorNotice(details ? `${message} ${details}` : message, 'error');
+};
+
+const readFileAsDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => resolve(String(event.target?.result || ''));
+    reader.onerror = () => reject(reader.error ?? new Error(`Unable to read "${file.name}".`));
+    reader.readAsDataURL(file);
+  });
+
+const getExportFileName = () => {
+  const projectSegment = currentProjectName.value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  const dateSegment = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  return `${projectSegment || 'screenshot-magician'}-${dateSegment}.png`;
+};
+
+const appShareUrl = computed(() => {
+  if (typeof window === 'undefined') {
+    return '';
+  }
+
+  return new URL(import.meta.env.BASE_URL || '/', window.location.origin).toString();
+});
+
+const sharePromptHeadline = computed(() =>
+  sharePromptContext.value === 'upload'
+    ? 'Your image link is copied. Want to share the app too?'
+    : 'Export complete. Want to share the app too?'
+);
+
+const sharePromptBody = computed(() =>
+  sharePromptContext.value === 'upload'
+    ? 'If this upload flow saved you time, send Screenshot Magician to someone still wrestling with Photoshop.'
+    : 'If this export saved you time, send Screenshot Magician to someone still wrestling with Photoshop.'
+);
+
+const shareSnippetText = computed(() => {
+  const appUrl = appShareUrl.value;
+
+  if (shareSnippetStyle.value === 'short') {
+    return `Screenshot Magician saved me a ton of time for GTA World screenshots: ${appUrl}`;
+  }
+
+  if (shareSnippetStyle.value === 'forum') {
+    return `Made this with Screenshot Magician.\nWay faster than Photoshop for GTA World screenshots.\n${appUrl}`;
+  }
+
+  return `Been using Screenshot Magician for GTA World screenshots and it is way faster than Photoshop for this kind of work: ${appUrl}`;
+});
+
+const canUseNativeShare = computed(() =>
+  typeof navigator !== 'undefined' && typeof navigator.share === 'function'
+);
+
+const closeShareDialog = () => {
+  showShareDialog.value = false;
+
+  if (disableSharePromptOnClose.value) {
+    sharePromptEnabled.value = false;
+  }
+};
 
 const getAnalyticsContext = () => ({
   has_image: Boolean(droppedImageSrc.value),
@@ -1998,10 +2109,12 @@ const handleFileSelect = (event: Event) => {
           ...getAnalyticsContext()
         });
       };
+      reader.onerror = () => {
+        reportError(`Unable to read "${file.name}" as an image.`, reader.error);
+      };
       reader.readAsDataURL(file);
     } else {
-      console.warn('Selected file is not an image.');
-      // Optionally show an error message to the user
+      showEditorNotice(`"${file.name}" is not an image file.`, 'error');
     }
     
     // Reset the input so the same file can be selected again
@@ -2014,17 +2127,18 @@ const handleImageOverlayFileSelect = (event: Event) => {
   const files = target.files;
 
   if (files && files.length > 0) {
-    Array.from(files).forEach((file) => {
+    Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith('image/')) {
-        console.warn('Selected overlay file is not an image.');
+        showEditorNotice(`"${file.name}" is not an image file.`, 'error');
         return;
       }
 
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        addImageOverlayFromFile(file, e.target?.result as string);
-      };
-      reader.readAsDataURL(file);
+      try {
+        const src = await readFileAsDataUrl(file);
+        await addImageOverlayFromFile(file, src);
+      } catch (error) {
+        reportError(`Unable to add "${file.name}" as an image overlay.`, error);
+      }
     });
 
     target.value = '';
@@ -2053,12 +2167,10 @@ const handleChatFileSelect = async (event: Event) => {
         });
         parseChatlog(); // Automatically parse the imported chat
       } catch (error) {
-        console.error('Error reading chat file:', error);
-        // Optionally show an error message to the user
+        reportError(`Unable to read "${file.name}" as a chat file.`, error);
       }
     } else {
-      console.warn('Selected file is not a text file.');
-      // Optionally show an error message to the user
+      showEditorNotice(`"${file.name}" must be a plain text file.`, 'error');
     }
     
     // Reset the input so the same file can be selected again
@@ -2082,7 +2194,10 @@ const triggerProjectFileInput = () => {
 const exportProjectFile = async (projectId: string) => {
   try {
     const project = await loadStoredProject(projectId);
-    if (!project) return;
+    if (!project) {
+      showEditorNotice('That project could not be found for export.', 'error');
+      return;
+    }
 
     const portableProject = toPortableProjectFile(project);
     const projectSlug = project.name
@@ -2099,8 +2214,9 @@ const exportProjectFile = async (projectId: string) => {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+    showEditorNotice(`Exported "${project.name}" to a .ssmag file.`, 'success');
   } catch (error) {
-    console.error('Error exporting project file:', error);
+    reportError('Unable to export that project right now.', error);
   }
 };
 
@@ -2138,8 +2254,9 @@ const handleProjectFileImport = async (event: Event) => {
 
     await saveStoredProject(importedProject);
     await refreshProjectList();
+    showEditorNotice(`Imported "${importedProject.name}" successfully.`, 'success');
   } catch (error) {
-    console.error('Error importing project file:', error);
+    reportError(`Unable to import "${file.name}".`, error);
   } finally {
     target.value = '';
   }
@@ -2183,10 +2300,12 @@ const handleDrop = (event: DragEvent) => {
 
         addImageOverlayFromFile(file, e.target?.result as string);
       };
+      reader.onerror = () => {
+        reportError(`Unable to read "${file.name}" as an image.`, reader.error);
+      };
       reader.readAsDataURL(file);
     } else {
-      console.warn('Dropped file is not an image.');
-      // Optionally show an error message to the user
+      showEditorNotice(`"${file.name}" is not an image file.`, 'error');
     }
   }
 };
@@ -2379,253 +2498,387 @@ const effectAwareImageOverlays = computed(() => {
   };
 });
 
-// Update the saveImage function to ensure 1:1 positioning match with preview
-const saveImage = async () => {
+const createExportImageBlob = async () => {
   if (!droppedImageSrc.value) {
-    console.warn('No image to save');
+    throw new Error('Add an image before exporting a screenshot.');
+  }
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Could not get canvas context');
+  }
+
+  // Set canvas size to match the drop zone exactly
+  canvas.width = dropZoneWidth.value || 800;
+  canvas.height = dropZoneHeight.value || 600;
+
+  // Draw background
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const drawOverlayCollection = async (overlays: ImageOverlay[]) => {
+    for (const overlay of overlays) {
+      const overlayCanvas = await buildMaskedImageOverlayCanvas(overlay);
+      if (!overlayCanvas) continue;
+
+      ctx.save();
+      ctx.globalAlpha = overlay.opacity;
+      ctx.translate(overlay.transform.x, overlay.transform.y);
+      ctx.scale(overlay.transform.scale, overlay.transform.scale);
+      ctx.drawImage(overlayCanvas, 0, 0);
+      ctx.restore();
+    }
+  };
+
+  if (hasSceneImageEffects.value) {
+    const affectedSceneCanvas = await buildAffectedSceneCanvas();
+    if (affectedSceneCanvas) {
+      const processedSceneCanvas = await applyImageEffectsToSceneCanvas(affectedSceneCanvas);
+      ctx.drawImage(processedSceneCanvas, 0, 0, canvas.width, canvas.height);
+    }
+  } else {
+    const affectedSceneCanvas = await buildAffectedSceneCanvas();
+    if (affectedSceneCanvas) {
+      ctx.drawImage(affectedSceneCanvas, 0, 0, canvas.width, canvas.height);
+    }
+
+    activeImageEffectLayers.value.forEach(({ effect, preset }) => {
+      const effectCanvas = buildImageEffectCanvas(effect, canvas.width, canvas.height);
+      if (!effectCanvas) return;
+
+      ctx.save();
+      ctx.globalAlpha = effect.opacity;
+      ctx.globalCompositeOperation = preset.blendMode;
+      ctx.drawImage(effectCanvas, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    });
+  }
+
+  await drawOverlayCollection(effectAwareImageOverlays.value.unaffected);
+
+  const visibleChatOverlays = chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0);
+
+  if (visibleChatOverlays.length > 0) {
+    ctx.font = '700 12px Arial, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.textRendering = 'geometricPrecision';
+    ctx.letterSpacing = '0px';
+
+    const drawBlackBar = (y: number, width: number) => {
+      if (showBlackBars.value) {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, y, width + 8, 17);
+      }
+    };
+
+    const drawStandardText = (
+      targetCtx: CanvasRenderingContext2D,
+      text: string,
+      x: number,
+      y: number,
+      color: string
+    ) => {
+      const textOffsetY = 1;
+      const shadowOffsets = [
+        [-1, -1], [-1, 0], [-1, 1],
+        [0, -1],           [0, 1],
+        [1, -1], [1, 0], [1, 1]
+      ];
+
+      targetCtx.fillStyle = '#000000';
+      shadowOffsets.forEach(([dx, dy]) => {
+        targetCtx.fillText(text, x + dx, y + textOffsetY + dy);
+      });
+
+      targetCtx.fillStyle = color;
+      targetCtx.fillText(text, x, y + textOffsetY);
+    };
+
+    const drawTextWithOutline = (text: string, x: number, y: number, color: string, censorType?: CensorType) => {
+      const width = ctx.measureText(text).width;
+
+      if (showBlackBars.value) {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(x - 2, y, width + 4, 16);
+      }
+
+      if (censorType === CensorType.Invisible) {
+        return;
+      }
+
+      if (censorType === CensorType.BlackBar) {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(x, y, width, 16);
+        return;
+      }
+
+      if (censorType === CensorType.Blur) {
+        const tempCanvas = document.createElement('canvas');
+        const tempCtx = tempCanvas.getContext('2d');
+        if (!tempCtx) return;
+
+        tempCanvas.width = width + 20;
+        tempCanvas.height = 16 + 20;
+
+        tempCtx.font = ctx.font;
+        tempCtx.textBaseline = ctx.textBaseline;
+        tempCtx.textRendering = ctx.textRendering;
+
+        drawStandardText(tempCtx, text, 10, 10, color);
+
+        ctx.save();
+        ctx.filter = 'blur(4px)';
+        ctx.drawImage(tempCanvas, x - 10, y - 10);
+        ctx.restore();
+        return;
+      }
+
+      drawStandardText(ctx, text, x, y, color);
+    };
+
+    const measureCharacters = (characters: Array<{ character: string }>) =>
+      ctx.measureText(characters.map((character) => character.character).join('')).width;
+
+    const drawCharacterRun = (
+      characters: Array<{ character: string; color: string; censorType?: CensorType }>,
+      xPos: number,
+      yPos: number
+    ) => {
+      let currentX = xPos;
+
+      collapseStyledCharacters(characters).forEach((run) => {
+        drawTextWithOutline(run.text, currentX, yPos, run.color, run.censorType);
+        currentX += ctx.measureText(run.text).width;
+      });
+    };
+
+    for (const overlay of visibleChatOverlays) {
+      ctx.save();
+      ctx.translate(overlay.transform.x, overlay.transform.y);
+      ctx.scale(overlay.transform.scale, overlay.transform.scale);
+
+      let currentY = 0;
+      const maxTextWidth = overlay.lineWidth - 8;
+
+      for (let lineIndex = 0; lineIndex < overlay.parsedLines.length; lineIndex++) {
+        const line = overlay.parsedLines[lineIndex];
+        const styledCharacters = getStyledCharacters(overlay, lineIndex, line.text);
+        let remainingCharacters = [...styledCharacters];
+
+        while (remainingCharacters.length > 0) {
+          if (measureCharacters(remainingCharacters) <= maxTextWidth) {
+            const currentLineWidth = measureCharacters(remainingCharacters);
+            drawBlackBar(currentY, currentLineWidth);
+            drawCharacterRun(remainingCharacters, 4, currentY);
+            currentY += 16;
+            remainingCharacters = [];
+            continue;
+          }
+
+          let breakIndex = 0;
+          let lastSpaceIndex = -1;
+
+          for (let index = 0; index < remainingCharacters.length; index++) {
+            const testCharacters = remainingCharacters.slice(0, index + 1);
+            if (measureCharacters(testCharacters) > maxTextWidth) {
+              breakIndex = lastSpaceIndex > 0 ? lastSpaceIndex : index;
+              break;
+            }
+
+            if (remainingCharacters[index].character === ' ') {
+              lastSpaceIndex = index;
+            }
+          }
+
+          if (breakIndex === 0) {
+            breakIndex = Math.max(1, remainingCharacters.length - 1);
+          }
+
+          let lineCharacters = remainingCharacters.slice(0, breakIndex);
+          remainingCharacters = remainingCharacters.slice(
+            remainingCharacters[breakIndex]?.character === ' ' ? breakIndex + 1 : breakIndex
+          );
+
+          while (lineCharacters[lineCharacters.length - 1]?.character === ' ') {
+            lineCharacters = lineCharacters.slice(0, -1);
+          }
+
+          if (lineCharacters.length === 0) {
+            lineCharacters = remainingCharacters.slice(0, 1);
+            remainingCharacters = remainingCharacters.slice(1);
+          }
+
+          const currentLineWidth = measureCharacters(lineCharacters);
+          drawBlackBar(currentY, currentLineWidth);
+          drawCharacterRun(lineCharacters, 4, currentY);
+          currentY += 16;
+        }
+      }
+
+      ctx.restore();
+    }
+  }
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((result) => {
+      if (!result) {
+        reject(new Error('Failed to create blob'));
+        return;
+      }
+
+      resolve(result);
+    }, 'image/png');
+  });
+};
+
+const downloadBlob = (blob: Blob, fileName: string) => {
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+};
+
+const openSharePrompt = (context: 'export' | 'upload') => {
+  sharePromptContext.value = context;
+
+  if (context === 'upload') {
+    shareSnippetStyle.value = 'forum';
+  } else {
+    shareSnippetStyle.value = 'casual';
+  }
+
+  if (!sharePromptEnabled.value) {
+    return;
+  }
+
+  disableSharePromptOnClose.value = false;
+  showShareDialog.value = true;
+};
+
+const copyAppShareLink = async () => {
+  try {
+    await copyTextToClipboard(appShareUrl.value);
+    trackEvent('share_app_link_copy', {
+      share_context: sharePromptContext.value,
+      share_method: 'link',
+      ...getAnalyticsContext()
+    });
+    showEditorNotice('Copied the app link to your clipboard.', 'success');
+  } catch (error) {
+    reportError('Unable to copy the app link right now.', error);
+  }
+};
+
+const copyShareSnippet = async () => {
+  try {
+    await copyTextToClipboard(shareSnippetText.value);
+    trackEvent('share_app_link_copy', {
+      share_context: sharePromptContext.value,
+      share_method: `snippet_${shareSnippetStyle.value}`,
+      ...getAnalyticsContext()
+    });
+    showEditorNotice('Copied a share message to your clipboard.', 'success');
+  } catch (error) {
+    reportError('Unable to copy the share message right now.', error);
+  }
+};
+
+const shareAppNatively = async () => {
+  if (!canUseNativeShare.value) {
+    showEditorNotice('Native sharing is not available in this browser.', 'info');
     return;
   }
 
   try {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      throw new Error('Could not get canvas context');
+    await navigator.share({
+      title: 'Screenshot Magician',
+      text: shareSnippetText.value,
+      url: appShareUrl.value
+    });
+    trackEvent('share_app_link_copy', {
+      share_context: sharePromptContext.value,
+      share_method: 'native_share',
+      ...getAnalyticsContext()
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      return;
     }
 
-    // Set canvas size to match the drop zone exactly
-    canvas.width = dropZoneWidth.value || 800;
-    canvas.height = dropZoneHeight.value || 600;
+    reportError('Unable to open the share sheet right now.', error);
+  }
+};
 
-    // Draw background
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    const drawOverlayCollection = async (overlays: ImageOverlay[]) => {
-      for (const overlay of overlays) {
-        const overlayCanvas = await buildMaskedImageOverlayCanvas(overlay);
-        if (!overlayCanvas) continue;
-
-        ctx.save();
-        ctx.globalAlpha = overlay.opacity;
-        ctx.translate(overlay.transform.x, overlay.transform.y);
-        ctx.scale(overlay.transform.scale, overlay.transform.scale);
-        ctx.drawImage(overlayCanvas, 0, 0);
-        ctx.restore();
-      }
-    };
-
-    if (hasSceneImageEffects.value) {
-      const affectedSceneCanvas = await buildAffectedSceneCanvas();
-      if (affectedSceneCanvas) {
-        const processedSceneCanvas = await applyImageEffectsToSceneCanvas(affectedSceneCanvas);
-        ctx.drawImage(processedSceneCanvas, 0, 0, canvas.width, canvas.height);
-      }
-    } else {
-      const affectedSceneCanvas = await buildAffectedSceneCanvas();
-      if (affectedSceneCanvas) {
-        ctx.drawImage(affectedSceneCanvas, 0, 0, canvas.width, canvas.height);
-      }
-
-      activeImageEffectLayers.value.forEach(({ effect, preset }) => {
-        const effectCanvas = buildImageEffectCanvas(effect, canvas.width, canvas.height);
-        if (!effectCanvas) return;
-
-        ctx.save();
-        ctx.globalAlpha = effect.opacity;
-        ctx.globalCompositeOperation = preset.blendMode;
-        ctx.drawImage(effectCanvas, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
-      });
-    }
-
-    await drawOverlayCollection(effectAwareImageOverlays.value.unaffected);
-
-    const visibleChatOverlays = chatOverlays.value.filter((overlay) => overlay.parsedLines.length > 0);
-
-    if (visibleChatOverlays.length > 0) {
-      ctx.font = '700 12px Arial, sans-serif';
-      ctx.textBaseline = 'top';
-      ctx.textRendering = 'geometricPrecision';
-      ctx.letterSpacing = '0px';
-
-      const drawBlackBar = (y: number, width: number) => {
-        if (showBlackBars.value) {
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(0, y, width + 8, 17);
-        }
-      };
-
-      const drawStandardText = (
-        targetCtx: CanvasRenderingContext2D,
-        text: string,
-        x: number,
-        y: number,
-        color: string
-      ) => {
-        const textOffsetY = 1;
-        const shadowOffsets = [
-          [-1, -1], [-1, 0], [-1, 1],
-          [0, -1],           [0, 1],
-          [1, -1], [1, 0], [1, 1]
-        ];
-
-        targetCtx.fillStyle = '#000000';
-        shadowOffsets.forEach(([dx, dy]) => {
-          targetCtx.fillText(text, x + dx, y + textOffsetY + dy);
-        });
-
-        targetCtx.fillStyle = color;
-        targetCtx.fillText(text, x, y + textOffsetY);
-      };
-
-      const drawTextWithOutline = (text: string, x: number, y: number, color: string, censorType?: CensorType) => {
-        const width = ctx.measureText(text).width;
-
-        if (showBlackBars.value) {
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(x - 2, y, width + 4, 16);
-        }
-
-        if (censorType === CensorType.Invisible) {
-          return;
-        }
-
-        if (censorType === CensorType.BlackBar) {
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(x, y, width, 16);
-          return;
-        }
-
-        if (censorType === CensorType.Blur) {
-          const tempCanvas = document.createElement('canvas');
-          const tempCtx = tempCanvas.getContext('2d');
-          if (!tempCtx) return;
-
-          tempCanvas.width = width + 20;
-          tempCanvas.height = 16 + 20;
-
-          tempCtx.font = ctx.font;
-          tempCtx.textBaseline = ctx.textBaseline;
-          tempCtx.textRendering = ctx.textRendering;
-
-          drawStandardText(tempCtx, text, 10, 10, color);
-
-          ctx.save();
-          ctx.filter = 'blur(4px)';
-          ctx.drawImage(tempCanvas, x - 10, y - 10);
-          ctx.restore();
-          return;
-        }
-
-        drawStandardText(ctx, text, x, y, color);
-      };
-
-      const measureCharacters = (characters: Array<{ character: string }>) =>
-        ctx.measureText(characters.map((character) => character.character).join('')).width;
-
-      const drawCharacterRun = (
-        characters: Array<{ character: string; color: string; censorType?: CensorType }>,
-        xPos: number,
-        yPos: number
-      ) => {
-        let currentX = xPos;
-
-        collapseStyledCharacters(characters).forEach((run) => {
-          drawTextWithOutline(run.text, currentX, yPos, run.color, run.censorType);
-          currentX += ctx.measureText(run.text).width;
-        });
-      };
-
-      for (const overlay of visibleChatOverlays) {
-        ctx.save();
-        ctx.translate(overlay.transform.x, overlay.transform.y);
-        ctx.scale(overlay.transform.scale, overlay.transform.scale);
-
-        let currentY = 0;
-        const maxTextWidth = overlay.lineWidth - 8;
-
-        for (let lineIndex = 0; lineIndex < overlay.parsedLines.length; lineIndex++) {
-          const line = overlay.parsedLines[lineIndex];
-          const styledCharacters = getStyledCharacters(overlay, lineIndex, line.text);
-          let remainingCharacters = [...styledCharacters];
-
-          while (remainingCharacters.length > 0) {
-            if (measureCharacters(remainingCharacters) <= maxTextWidth) {
-              const currentLineWidth = measureCharacters(remainingCharacters);
-              drawBlackBar(currentY, currentLineWidth);
-              drawCharacterRun(remainingCharacters, 4, currentY);
-              currentY += 16;
-              remainingCharacters = [];
-              continue;
-            }
-
-            let breakIndex = 0;
-            let lastSpaceIndex = -1;
-
-            for (let index = 0; index < remainingCharacters.length; index++) {
-              const testCharacters = remainingCharacters.slice(0, index + 1);
-              if (measureCharacters(testCharacters) > maxTextWidth) {
-                breakIndex = lastSpaceIndex > 0 ? lastSpaceIndex : index;
-                break;
-              }
-
-              if (remainingCharacters[index].character === ' ') {
-                lastSpaceIndex = index;
-              }
-            }
-
-            if (breakIndex === 0) {
-              breakIndex = Math.max(1, remainingCharacters.length - 1);
-            }
-
-            let lineCharacters = remainingCharacters.slice(0, breakIndex);
-            remainingCharacters = remainingCharacters.slice(
-              remainingCharacters[breakIndex]?.character === ' ' ? breakIndex + 1 : breakIndex
-            );
-
-            while (lineCharacters[lineCharacters.length - 1]?.character === ' ') {
-              lineCharacters = lineCharacters.slice(0, -1);
-            }
-
-            if (lineCharacters.length === 0) {
-              lineCharacters = remainingCharacters.slice(0, 1);
-              remainingCharacters = remainingCharacters.slice(1);
-            }
-
-            const currentLineWidth = measureCharacters(lineCharacters);
-            drawBlackBar(currentY, currentLineWidth);
-            drawCharacterRun(lineCharacters, 4, currentY);
-            currentY += 16;
-          }
-        }
-
-        ctx.restore();
-      }
-    }
-
-    // Convert to blob and save
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        throw new Error('Failed to create blob');
-      }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'screenshot.png';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      trackEvent('export_image', {
-        export_format: 'png',
-        ...getAnalyticsContext()
-      });
-      void recordImageExport();
-    }, 'image/png');
+// Update the saveImage function to ensure 1:1 positioning match with preview
+const saveImage = async () => {
+  try {
+    const blob = await createExportImageBlob();
+    downloadBlob(blob, getExportFileName());
+    trackEvent('export_image', {
+      export_format: 'png',
+      ...getAnalyticsContext()
+    });
+    void recordImageExport();
+    showEditorNotice('Exported the screenshot successfully.', 'success');
+    openSharePrompt('export');
 
   } catch (error) {
-    console.error('Error saving image:', error);
+    reportError('Unable to export the screenshot right now.', error);
+  }
+};
+
+const copyUploadedImageLink = async () => {
+  if (!lastUploadedImageUrl.value) {
+    showEditorNotice('Upload an image first to copy its direct link.', 'info');
+    return;
+  }
+
+  try {
+    await copyTextToClipboard(lastUploadedImageUrl.value);
+    showEditorNotice('Copied the direct image link to your clipboard.', 'success');
+  } catch (error) {
+    reportError('Unable to copy the uploaded image link.', error);
+  }
+};
+
+const uploadImageToImgBbHost = async () => {
+  if (!imageHostImgBbApiKey.value.trim()) {
+    showSettingsDialog.value = true;
+    showEditorNotice('Add your ImgBB API key in Settings before uploading.', 'info');
+    return;
+  }
+
+  isImageHostUploadInProgress.value = true;
+
+  try {
+    const blob = await createExportImageBlob();
+    const uploadResult = await uploadImageToImgBb({
+      apiKey: imageHostImgBbApiKey.value,
+      fileName: getExportFileName(),
+      image: blob
+    });
+
+    lastUploadedImageUrl.value = uploadResult.directUrl;
+    await copyTextToClipboard(uploadResult.directUrl);
+    trackEvent('upload_image_host', {
+      host_provider: uploadResult.provider,
+      host_has_direct_url: Boolean(uploadResult.directUrl),
+      ...getAnalyticsContext()
+    });
+    showEditorNotice('Uploaded to ImgBB and copied the direct image link.', 'success');
+    openSharePrompt('upload');
+  } catch (error) {
+    reportError('Unable to upload the screenshot to ImgBB right now.', error);
+  } finally {
+    isImageHostUploadInProgress.value = false;
   }
 };
 
@@ -2757,6 +3010,7 @@ const sessionPersistence = useMagicianSessionPersistence({
   currentProjectName,
   getChatOverlayName,
   parseChatText,
+  reportError,
   toSerializableSnapshot
 });
 
@@ -2820,6 +3074,19 @@ const loadSmartGuidePreferences = () => {
   if (Number.isFinite(storedStrength)) {
     smartGuideStrength.value = Math.min(24, Math.max(2, storedStrength));
   }
+};
+
+const loadImageHostingPreferences = () => {
+  if (typeof window === 'undefined') return;
+
+  imageHostImgBbApiKey.value = window.localStorage.getItem(IMAGE_HOSTING_IMGBB_API_KEY_STORAGE_KEY) || '';
+};
+
+const loadSharePromptPreference = () => {
+  if (typeof window === 'undefined') return;
+
+  const storedPreference = window.localStorage.getItem(SHARE_PROMPT_ENABLED_STORAGE_KEY);
+  sharePromptEnabled.value = storedPreference !== 'false';
 };
 
 const goToNextTutorialStep = () => {
@@ -2907,6 +3174,8 @@ onMounted(async () => {
   window.addEventListener('keyup', handleEditorHistoryKeyup);
   loadNavigatorPreference();
   loadSmartGuidePreferences();
+  loadImageHostingPreferences();
+  loadSharePromptPreference();
   loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
@@ -2984,6 +3253,16 @@ watch(smartGuideStrength, (value) => {
   }
 
   window.localStorage.setItem(SMART_GUIDE_STRENGTH_STORAGE_KEY, String(clampedValue));
+});
+
+watch(imageHostImgBbApiKey, (value) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(IMAGE_HOSTING_IMGBB_API_KEY_STORAGE_KEY, value.trim());
+});
+
+watch(sharePromptEnabled, (value) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(SHARE_PROMPT_ENABLED_STORAGE_KEY, String(value));
 });
 
 watch(imageMaskBrushSize, (value) => {
@@ -3103,6 +3382,7 @@ const {
   pendingProjectName,
   projectRecords,
   resetSession,
+  reportError,
   showDeleteProjectDialog,
   showProjectsDialog,
   showSaveProjectDialog,
@@ -3373,6 +3653,17 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             ></v-btn>
           </template>
         </v-tooltip>
+        <v-tooltip text="Upload to ImgBB" location="bottom">
+          <template v-slot:activator="{ props }">
+            <v-btn
+              v-bind="props"
+              icon="mdi-cloud-upload-outline"
+              @click="uploadImageToImgBbHost"
+              :loading="isImageHostUploadInProgress"
+              :disabled="!droppedImageSrc || isImageHostUploadInProgress"
+            ></v-btn>
+          </template>
+        </v-tooltip>
       </div>
       </template>
       <template v-else>
@@ -3632,6 +3923,17 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                     icon="mdi-content-save-outline"
                     @click="saveImage"
                     :disabled="!droppedImageSrc"
+                  ></v-btn>
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Upload to ImgBB" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-cloud-upload-outline"
+                    @click="uploadImageToImgBbHost"
+                    :loading="isImageHostUploadInProgress"
+                    :disabled="!droppedImageSrc || isImageHostUploadInProgress"
                   ></v-btn>
                 </template>
               </v-tooltip>
@@ -3903,6 +4205,25 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
           <div class="settings-section mb-6">
             <div class="settings-section-header">
+              <div class="text-subtitle-1">Sharing</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Stay in control of whether the editor suggests sharing the app after a successful export or upload.
+              </div>
+            </div>
+            <v-switch
+              v-model="sharePromptEnabled"
+              color="primary"
+              inset
+              hide-details
+              label="Show share prompt after export or upload"
+            ></v-switch>
+            <div class="text-caption text-medium-emphasis mt-2">
+              Turn this back on here anytime if you decide you want the reminder again.
+            </div>
+          </div>
+
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
               <div class="text-subtitle-1">Theme Presets</div>
               <div class="text-body-2 text-medium-emphasis">
                 Switch the whole editor between built-in looks.
@@ -4090,6 +4411,78 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                 </v-btn>
               </v-col>
             </v-row>
+          </div>
+
+          <div class="settings-section mb-6">
+            <div class="settings-section-header">
+              <div class="text-subtitle-1">Image Hosting</div>
+              <div class="text-body-2 text-medium-emphasis">
+                Upload the current screenshot to your own ImgBB setup, then copy the direct image link for forum sharing.
+              </div>
+            </div>
+            <div class="text-body-2 mb-3">
+              Get your ImgBB API key from
+              <a
+                href="https://api.imgbb.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                api.imgbb.com
+              </a>.
+            </div>
+            <div class="text-caption text-medium-emphasis mb-4">
+              Open that page, sign in if needed, copy your API key, then paste it here.
+            </div>
+            <v-text-field
+              v-model="imageHostImgBbApiKey"
+              label="ImgBB API Key"
+              variant="outlined"
+              density="comfortable"
+              type="password"
+              autocomplete="off"
+              hide-details
+            ></v-text-field>
+            <div class="text-caption text-medium-emphasis mt-3">
+              This key stays in local browser storage on this machine. Imgur account upload will need a backend OAuth step, so this first version uses ImgBB only.
+            </div>
+            <div class="settings-action-row mt-4">
+              <v-btn
+                variant="text"
+                prepend-icon="mdi-open-in-new"
+                href="https://api.imgbb.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Open ImgBB API Page
+              </v-btn>
+              <v-btn
+                color="primary"
+                prepend-icon="mdi-cloud-upload-outline"
+                :loading="isImageHostUploadInProgress"
+                :disabled="!droppedImageSrc || isImageHostUploadInProgress"
+                @click="uploadImageToImgBbHost"
+              >
+                Upload Current Screenshot
+              </v-btn>
+              <v-btn
+                variant="tonal"
+                prepend-icon="mdi-content-copy"
+                :disabled="!lastUploadedImageUrl"
+                @click="copyUploadedImageLink"
+              >
+                Copy Last Link
+              </v-btn>
+            </div>
+            <v-text-field
+              v-model="lastUploadedImageUrl"
+              label="Last uploaded direct link"
+              variant="outlined"
+              density="comfortable"
+              readonly
+              class="mt-4"
+              hide-details
+              placeholder="Upload a screenshot to fill this in"
+            ></v-text-field>
           </div>
 
           <div class="settings-section">
@@ -4444,6 +4837,82 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       accept=".ssmag,application/json"
       @change="handleProjectFileImport"
     />
+
+    <v-dialog v-model="showShareDialog" max-width="560">
+      <v-card>
+        <v-card-title class="text-h6">
+          {{ sharePromptHeadline }}
+        </v-card-title>
+        <v-card-text>
+          <div class="text-body-2 text-medium-emphasis mb-4">
+            {{ sharePromptBody }}
+          </div>
+          <div class="text-subtitle-2 mb-2">Choose a share message</div>
+          <v-btn-toggle
+            v-model="shareSnippetStyle"
+            mandatory
+            color="primary"
+            variant="outlined"
+            divided
+            class="mb-4 flex-wrap"
+          >
+            <v-btn value="short">Short</v-btn>
+            <v-btn value="casual">Casual</v-btn>
+            <v-btn value="forum">Forum</v-btn>
+          </v-btn-toggle>
+          <v-textarea
+            :model-value="shareSnippetText"
+            label="Share message"
+            variant="outlined"
+            rows="4"
+            auto-grow
+            readonly
+            hide-details
+          ></v-textarea>
+          <div class="text-caption text-medium-emphasis mt-3">
+            The app link points back to Screenshot Magician so friends can try it immediately.
+          </div>
+          <v-checkbox
+            v-model="disableSharePromptOnClose"
+            color="primary"
+            hide-details
+            class="mt-4"
+            label="Don't show this again"
+          ></v-checkbox>
+        </v-card-text>
+        <v-card-actions class="flex-wrap ga-2">
+          <v-btn variant="text" prepend-icon="mdi-link-variant" @click="copyAppShareLink">
+            Copy App Link
+          </v-btn>
+          <v-btn variant="tonal" color="primary" prepend-icon="mdi-content-copy" @click="copyShareSnippet">
+            Copy Share Message
+          </v-btn>
+          <v-btn
+            v-if="canUseNativeShare"
+            variant="text"
+            prepend-icon="mdi-share-variant-outline"
+            @click="shareAppNatively"
+          >
+            Share
+          </v-btn>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="closeShareDialog">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-snackbar
+      v-model="editorNoticeVisible"
+      location="bottom right"
+      :color="editorNoticeTone"
+      :timeout="5000"
+      rounded="pill"
+    >
+      <div class="d-flex align-center ga-2">
+        <v-icon :icon="editorNoticeIcon"></v-icon>
+        <span>{{ editorNoticeMessage }}</span>
+      </div>
+    </v-snackbar>
 
     <!-- Row takes remaining height and full width. Padding applied here. -->
     <div class="layout-container pa-2" ref="parentRowRef">

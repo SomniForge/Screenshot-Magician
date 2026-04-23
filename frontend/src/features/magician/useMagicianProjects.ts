@@ -20,6 +20,7 @@ interface UseMagicianProjectsOptions {
   pendingProjectName: Ref<string>;
   projectRecords: Ref<Array<Pick<ProjectRecord, 'id' | 'name' | 'createdAt' | 'updatedAt'>>>;
   resetSession: () => void;
+  reportError: (message: string, error?: unknown) => void;
   showDeleteProjectDialog: Ref<boolean>;
   showProjectsDialog: Ref<boolean>;
   showSaveProjectDialog: Ref<boolean>;
@@ -47,6 +48,7 @@ export const useMagicianProjects = (options: UseMagicianProjectsOptions) => {
     pendingProjectName,
     projectRecords,
     resetSession,
+    reportError,
     showDeleteProjectDialog,
     showProjectsDialog,
     showSaveProjectDialog,
@@ -63,7 +65,7 @@ export const useMagicianProjects = (options: UseMagicianProjectsOptions) => {
       const projects = await listStoredProjects();
       projectRecords.value = projects.map(({ id, name, createdAt, updatedAt }) => ({ id, name, createdAt, updatedAt }));
     } catch (error) {
-      console.error('Error loading projects:', error);
+      reportError('Unable to load your saved projects right now.', error);
     } finally {
       isProjectsLoading.value = false;
     }
@@ -102,7 +104,7 @@ export const useMagicianProjects = (options: UseMagicianProjectsOptions) => {
       closePendingEditorAction();
       showProjectsDialog.value = false;
     } catch (error) {
-      console.error('Error loading project:', error);
+      reportError('Unable to open that project right now.', error);
     }
   };
 
@@ -186,7 +188,12 @@ export const useMagicianProjects = (options: UseMagicianProjectsOptions) => {
       return true;
     } catch (error) {
       autosaveState.value = autosave ? 'error' : autosaveState.value;
-      console.error('Error saving project:', error);
+      reportError(
+        autosave
+          ? 'Autosave failed. Try saving the project again.'
+          : 'Unable to save this project right now.',
+        error
+      );
       return false;
     }
   };
@@ -244,7 +251,7 @@ export const useMagicianProjects = (options: UseMagicianProjectsOptions) => {
       }
       await refreshProjectList();
     } catch (error) {
-      console.error('Error deleting project:', error);
+      reportError('Unable to delete that project right now.', error);
     }
   };
 

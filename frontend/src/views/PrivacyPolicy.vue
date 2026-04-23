@@ -51,13 +51,26 @@
                 Most of this data stays only in your browser. Visitor and session identifiers used for the live usage tracker are also sent to our backend so we can count visits, active sessions, and export activity without storing your image or chat content.
               </p>
 
-              <h2 class="text-h5 mb-4">4. Image Processing</h2>
+              <h2 class="text-h5 mb-4">4. Public Testimonials</h2>
+              <p class="mb-4">
+                If you choose to submit a testimonial or review through the website, the information you enter for that feature may be stored on our backend and displayed publicly on the home page. This may include:
+              </p>
+              <ul class="mb-4">
+                <li>The username you provide</li>
+                <li>Your star rating and written review</li>
+                <li>A pseudonymous visitor identifier used to rate-limit repeat submissions</li>
+              </ul>
+              <p class="mb-4">
+                Please only submit information you are comfortable making public. Testimonials are intended to be public-facing social proof for the project.
+              </p>
+
+              <h2 class="text-h5 mb-4">5. Image Processing</h2>
               <p class="mb-4">
                 All image processing occurs locally in your browser. Your images and chat logs are never uploaded 
                 to any server and remain entirely on your device.
               </p>
 
-              <h2 class="text-h5 mb-4">5. Service Telemetry and Live Usage Tracker</h2>
+              <h2 class="text-h5 mb-4">6. Service Telemetry and Live Usage Tracker</h2>
               <p class="mb-4">
                 We operate a lightweight backend service that records limited pseudonymous usage information to power the live community tracker and understand product usage. This telemetry may include:
               </p>
@@ -72,7 +85,7 @@
                 This telemetry is used for operational insight and public-facing aggregate counters. It is not used to upload or inspect your image files, chat logs, or exported screenshots.
               </p>
 
-              <h2 class="text-h5 mb-4">6. Analytics</h2>
+              <h2 class="text-h5 mb-4">7. Analytics</h2>
               <p class="mb-4">
                 To understand how our service is used and to improve user experience, we utilize Google Analytics. Google Analytics collects information such as:
               </p>
@@ -87,25 +100,25 @@
                 Google Analytics collects only the IP address assigned to you on the date you visit this site, rather than your name or other identifying information. We do not combine the information collected through the use of Google Analytics with personally identifiable information. Although Google Analytics plants a permanent cookie on your web browser to identify you as a unique user the next time you visit this site, the cookie cannot be used by anyone but Google. Google’s ability to use and share information collected by Google Analytics about your visits to this site is restricted by the <a href="https://marketingplatform.google.com/about/analytics/terms/us/" target="_blank" rel="noopener">Google Analytics Terms of Use</a> and the <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google Privacy Policy</a>. You can prevent Google Analytics from recognizing you on return visits to this site by disabling cookies on your browser or by installing the <a href="https://tools.google.com/dlpage/gaoptout/" target="_blank" rel="noopener">Google Analytics Opt-out Browser Add-on</a>.
               </p>
 
-              <h2 class="text-h5 mb-4">7. Third-Party Services</h2>
+              <h2 class="text-h5 mb-4">8. Third-Party Services</h2>
               <p class="mb-4">
                 Other than Google Analytics as described above, our website may contain links to third-party websites or services. We are not responsible for 
                 the privacy practices or content of these external sites.
               </p>
 
-              <h2 class="text-h5 mb-4">8. Children's Privacy</h2>
+              <h2 class="text-h5 mb-4">9. Children's Privacy</h2>
               <p class="mb-4">
                 Our service is not directed to children under 13. We do not knowingly collect or store any 
                 personal information from children under 13.
               </p>
 
-              <h2 class="text-h5 mb-4">9. Changes to This Policy</h2>
+              <h2 class="text-h5 mb-4">10. Changes to This Policy</h2>
               <p class="mb-4">
                 We may update this Privacy Policy from time to time. We will notify you of any changes by 
                 posting the new Privacy Policy on this page and updating the "Last updated" date.
               </p>
 
-              <h2 class="text-h5 mb-4">10. Contact Us</h2>
+              <h2 class="text-h5 mb-4">11. Contact Us</h2>
               <p class="mb-4">
                 If you have any questions about this Privacy Policy, please contact us:
               </p>

@@ -25,3 +25,5 @@ export const EDITOR_SESSION_RECORD_ID = 'current-session';
 export const SHOW_NAVIGATOR_STORAGE_KEY = 'magicianShowNavigator';
 export const SMART_GUIDES_ENABLED_STORAGE_KEY = 'magicianSmartGuidesEnabled';
 export const SMART_GUIDE_STRENGTH_STORAGE_KEY = 'magicianSmartGuideStrength';
+export const IMAGE_HOSTING_IMGBB_API_KEY_STORAGE_KEY = 'magicianImageHostingImgBbApiKey';
+export const SHARE_PROMPT_ENABLED_STORAGE_KEY = 'magicianSharePromptEnabled';

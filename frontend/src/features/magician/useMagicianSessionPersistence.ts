@@ -12,6 +12,7 @@ interface UseMagicianSessionPersistenceOptions {
   currentProjectName: Ref<string>;
   getChatOverlayName: (rawText: string, overlayIndex: number) => string;
   parseChatText: (rawText: string) => ChatOverlay['parsedLines'];
+  reportError: (message: string, error?: unknown) => void;
   toSerializableSnapshot: (snapshot: EditorStateSnapshot) => EditorStateSnapshot;
 }
 
@@ -24,6 +25,7 @@ export const useMagicianSessionPersistence = (options: UseMagicianSessionPersist
     currentProjectName,
     getChatOverlayName,
     parseChatText,
+    reportError,
     toSerializableSnapshot
   } = options;
 
@@ -41,7 +43,7 @@ export const useMagicianSessionPersistence = (options: UseMagicianSessionPersist
       window.localStorage.removeItem(EDITOR_STATE_STORAGE_KEY);
       Cookies.remove('editorState');
     } catch (error) {
-      console.error('Error saving editor state:', error);
+      reportError('Session recovery could not be updated in this browser.', error);
     }
   };
 
@@ -95,7 +97,7 @@ export const useMagicianSessionPersistence = (options: UseMagicianSessionPersist
         return;
       }
     } catch (error) {
-      console.error('Error loading editor state from IndexedDB:', error);
+      reportError('We could not restore your previous session from this browser.', error);
     }
 
     const legacySavedState = window.localStorage.getItem(EDITOR_STATE_STORAGE_KEY) || Cookies.get('editorState');
@@ -107,7 +109,7 @@ export const useMagicianSessionPersistence = (options: UseMagicianSessionPersist
       window.localStorage.removeItem(EDITOR_STATE_STORAGE_KEY);
       Cookies.remove('editorState');
     } catch (error) {
-      console.error('Error loading editor state:', error);
+      reportError('A saved editor session was found, but it could not be restored.', error);
     }
   };
 
