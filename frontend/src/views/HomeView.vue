@@ -200,9 +200,9 @@ const submitReview = async () => {
 <template>
   <div class="home-container">
     <section class="hero-section">
-      <v-container class="pt-16 pb-8">
+      <v-container class="home-shell home-shell--hero pt-16 pb-8">
         <v-row align="center" justify="center">
-          <v-col cols="12" md="8" class="text-center">
+          <v-col cols="12" class="text-center hero-copy-column">
             <h1 class="text-h2 font-weight-bold mb-6">
               Screenshot
               <span class="gradient-text">Magician</span>
@@ -248,7 +248,7 @@ const submitReview = async () => {
     </section>
 
     <section id="social-proof" class="trust-strip-section">
-      <v-container class="pt-0 pb-10">
+      <v-container class="home-shell home-shell--wide pt-0 pb-10">
         <v-row class="mb-6">
           <v-col cols="12">
             <div class="trust-strip">
@@ -311,7 +311,7 @@ const submitReview = async () => {
     </section>
 
     <section class="features-section">
-      <v-container class="pt-6 pb-14">
+      <v-container class="home-shell home-shell--wide pt-6 pb-14">
         <v-row>
           <v-col cols="12" class="text-center mb-12">
             <h2 class="text-h4 font-weight-bold mb-3">Why Switch?</h2>
@@ -647,6 +647,24 @@ const submitReview = async () => {
   overflow: hidden;
 }
 
+.home-shell {
+  width: min(100%, 1180px);
+  margin: 0 auto;
+}
+
+.home-shell--hero {
+  width: min(100%, 1040px);
+}
+
+.home-shell--wide {
+  width: min(100%, 1320px);
+}
+
+.hero-copy-column {
+  max-width: 920px;
+  margin: 0 auto;
+}
+
 .hero-section::before {
   content: '';
   position: absolute;
@@ -897,6 +915,12 @@ const submitReview = async () => {
 
   .trust-strip {
     grid-template-columns: 1fr;
+  }
+
+  .home-shell,
+  .home-shell--hero,
+  .home-shell--wide {
+    width: 100%;
   }
 }
 
