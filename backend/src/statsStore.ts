@@ -26,21 +26,39 @@ interface ActiveSession {
   currentPath: string;
 }
 
+interface StoredModerationEvent {
+  action: 'approve' | 'reject';
+  actedAt: string;
+  actorLabel: string;
+  fromStatus: 'approved' | 'pending' | 'rejected';
+  toStatus: 'approved' | 'pending' | 'rejected';
+}
+
 interface StoredTestimonial {
+  approvedAt?: string;
   createdAt: string;
   id: string;
+  moderationHistory: StoredModerationEvent[];
   name: string;
   quote: string;
   rating: number;
+  status: 'approved' | 'pending' | 'rejected';
   visitorId: string;
 }
 
 export interface PublicTestimonial {
+  approvedAt?: string;
   createdAt: string;
   id: string;
   name: string;
   quote: string;
   rating: number;
+}
+
+export interface ModerationTestimonial extends PublicTestimonial {
+  moderationHistory: StoredModerationEvent[];
+  status: 'approved' | 'pending' | 'rejected';
+  visitorId: string;
 }
 
 export interface StatsSummary {
@@ -159,9 +177,16 @@ export class StatsStore {
 
   listTestimonials(): PublicTestimonial[] {
     return [...this.testimonials]
+      .filter((testimonial) => testimonial.status === 'approved')
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
       .slice(0, 12)
       .map((testimonial) => this.toPublicTestimonial(testimonial));
+  }
+
+  listTestimonialsForModeration(): ModerationTestimonial[] {
+    return [...this.testimonials]
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .map((testimonial) => this.toModerationTestimonial(testimonial));
   }
 
   addTestimonial(input: {
@@ -169,7 +194,7 @@ export class StatsStore {
     quote: string;
     rating: number;
     visitorId: string;
-  }): PublicTestimonial {
+  }): ModerationTestimonial {
     const visitorId = input.visitorId.trim();
     const name = input.name.trim();
     const quote = input.quote.trim();
@@ -220,18 +245,45 @@ export class StatsStore {
     }
 
     const createdTestimonial: StoredTestimonial = {
+      approvedAt: undefined,
       createdAt: new Date().toISOString(),
       id: this.createId(),
+      moderationHistory: [],
       name,
       quote,
       rating,
+      status: 'pending',
       visitorId
     };
 
     this.testimonials.unshift(createdTestimonial);
     this.schedulePersistTestimonials();
 
-    return this.toPublicTestimonial(createdTestimonial);
+    return this.toModerationTestimonial(createdTestimonial);
+  }
+
+  moderateTestimonial(testimonialId: string, action: 'approve' | 'reject', actorLabel = 'Admin') {
+    const testimonial = this.testimonials.find((item) => item.id === testimonialId);
+    if (!testimonial) {
+      throw new Error('That testimonial could not be found.');
+    }
+
+    const actedAt = new Date().toISOString();
+    const fromStatus = testimonial.status;
+    const toStatus = action === 'approve' ? 'approved' : 'rejected';
+
+    testimonial.moderationHistory.unshift({
+      action,
+      actedAt,
+      actorLabel: actorLabel.trim() || 'Admin',
+      fromStatus,
+      toStatus
+    });
+    testimonial.status = toStatus;
+    testimonial.approvedAt = action === 'approve' ? actedAt : undefined;
+    this.schedulePersistTestimonials();
+
+    return this.toModerationTestimonial(testimonial);
   }
 
   private getActiveVisitorCount() {
@@ -312,11 +364,21 @@ export class StatsStore {
 
   private toPublicTestimonial(testimonial: StoredTestimonial): PublicTestimonial {
     return {
+      approvedAt: testimonial.approvedAt,
       createdAt: testimonial.createdAt,
       id: testimonial.id,
       name: testimonial.name,
       quote: testimonial.quote,
       rating: testimonial.rating
+    };
+  }
+
+  private toModerationTestimonial(testimonial: StoredTestimonial): ModerationTestimonial {
+    return {
+      ...this.toPublicTestimonial(testimonial),
+      moderationHistory: [...testimonial.moderationHistory],
+      status: testimonial.status,
+      visitorId: testimonial.visitorId
     };
   }
 
@@ -363,6 +425,25 @@ export class StatsStore {
               && typeof item?.visitorId === 'string'
               && typeof item?.createdAt === 'string'
             )
+            .map((item) => ({
+              ...item,
+              approvedAt: typeof item.approvedAt === 'string' ? item.approvedAt : undefined,
+              moderationHistory: Array.isArray(item.moderationHistory)
+                ? item.moderationHistory.filter((event): event is StoredModerationEvent =>
+                  typeof event?.action === 'string'
+                  && (event.action === 'approve' || event.action === 'reject')
+                  && typeof event?.actedAt === 'string'
+                  && typeof event?.actorLabel === 'string'
+                  && typeof event?.fromStatus === 'string'
+                  && (event.fromStatus === 'pending' || event.fromStatus === 'approved' || event.fromStatus === 'rejected')
+                  && typeof event?.toStatus === 'string'
+                  && (event.toStatus === 'pending' || event.toStatus === 'approved' || event.toStatus === 'rejected')
+                )
+                : [],
+              status: item.status === 'pending' || item.status === 'rejected' || item.status === 'approved'
+                ? item.status
+                : 'approved'
+            }))
           : []
       };
     } catch (error) {

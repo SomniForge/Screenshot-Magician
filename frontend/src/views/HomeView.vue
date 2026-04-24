@@ -177,7 +177,7 @@ const submitReview = async () => {
   }
 
   try {
-    await submitTestimonial({
+    const submission = await submitTestimonial({
       name: reviewForm.name.trim(),
       quote: reviewForm.quote.trim(),
       rating: reviewForm.rating
@@ -187,7 +187,7 @@ const submitReview = async () => {
     reviewForm.quote = '';
     reviewForm.rating = 5;
     reviewAlertTone.value = 'success';
-    reviewAlertText.value = 'Thanks for the review. It is now live on the home page.';
+    reviewAlertText.value = submission.message || 'Thanks for the review. It has been submitted for approval.';
   } catch (error) {
     reviewAlertTone.value = 'error';
     reviewAlertText.value = error instanceof Error
@@ -434,7 +434,7 @@ const submitReview = async () => {
               <v-card-item>
                 <v-card-title class="text-h5">Leave a Quick Review</v-card-title>
                 <v-card-subtitle>
-                  A short note here goes live on the home page and helps other people decide to try it.
+                  A short note here goes into the approval queue before it appears on the home page.
                 </v-card-subtitle>
               </v-card-item>
               <v-card-text>
@@ -466,7 +466,7 @@ const submitReview = async () => {
                   counter
                 ></v-textarea>
                 <div class="text-caption text-medium-emphasis">
-                  Keep it short, specific, and useful. Public reviews are shown on the home page.
+                  Keep it short, specific, and useful. Approved reviews are shown on the home page.
                 </div>
                 <v-alert
                   v-if="reviewAlertText"

@@ -7,11 +7,40 @@ defineOptions({
 });
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.31-beta';
+const version = 'v2.0.32-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.32-beta',
+        date: 'APR-23-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added a token-gated testimonial moderation page with approve and reject controls for pending reviews',
+                    'Added moderation audit trail history so testimonial status changes now record who acted, when, and what changed',
+                    'Added the first frontend unit test coverage for chat parsing, timestamp stripping, selection offsets, and censor rendering'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Upgraded the first-run tutorial into a guided walkthrough with highlighted controls, a demo project setup, and hands-on feature prompts',
+                    'Continued breaking Magician.vue into dedicated editor components, including the tutorial panel, keyboard shortcuts dialog, chat editor panel, and utility sidebar',
+                    'Updated the README to better reflect the current app, deployment flow, moderation system, and day-to-day editor usage'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed tutorial readability and added stronger visual highlighting so the walkthrough pulls attention to the controls being explained',
+                    'Fixed testimonial moderation requests for deployed frontends by allowing the required admin auth headers through backend CORS'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.31-beta',
         date: 'APR-22-2026',

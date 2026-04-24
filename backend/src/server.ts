@@ -7,6 +7,7 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 const statsStore = new StatsStore();
+const moderationToken = process.env.TESTIMONIAL_MODERATION_TOKEN?.trim() || '';
 const allowedOrigins = (process.env.CORS_ORIGIN || '*')
   .split(',')
   .map((origin) => origin.trim())
@@ -36,6 +37,36 @@ const logError = (message: string, error: unknown, details?: Record<string, unkn
   console.error(`[stats-backend] ${message}`, details ?? '', error);
 };
 
+const getAdminTokenFromRequest = (req: Request) => {
+  const headerValue = req.header('x-admin-token')?.trim();
+  if (headerValue) return headerValue;
+
+  const authorizationHeader = req.header('authorization')?.trim();
+  if (!authorizationHeader) return '';
+
+  const bearerMatch = authorizationHeader.match(/^Bearer\s+(.+)$/i);
+  return bearerMatch?.[1]?.trim() || '';
+};
+
+const requireModerationToken = (req: Request, res: Response) => {
+  if (!moderationToken) {
+    logWarn('moderation endpoint requested without configured token');
+    res.status(503).json({ error: 'Testimonial moderation is not configured on this server.' });
+    return false;
+  }
+
+  const requestToken = getAdminTokenFromRequest(req);
+  if (!requestToken || requestToken !== moderationToken) {
+    logWarn('moderation endpoint rejected for invalid token', {
+      path: req.originalUrl
+    });
+    res.status(401).json({ error: 'Invalid moderation token.' });
+    return false;
+  }
+
+  return true;
+};
+
 app.use(express.json());
 app.use((req, res, next) => {
   const startedAt = Date.now();
@@ -55,7 +86,7 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', resolveCorsOrigin(req.headers.origin));
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Token');
   res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
 
   if (req.method === 'OPTIONS') {
@@ -127,6 +158,15 @@ app.get('/api/testimonials', (_req: Request, res: Response) => {
   res.json(statsStore.listTestimonials());
 });
 
+app.get('/api/testimonials/moderation', (req: Request, res: Response) => {
+  if (!requireModerationToken(req, res)) {
+    return;
+  }
+
+  logInfo('testimonial moderation queue requested');
+  res.json(statsStore.listTestimonialsForModeration());
+});
+
 app.post('/api/testimonials', (req: Request, res: Response) => {
   const {
     name,
@@ -151,10 +191,14 @@ app.post('/api/testimonials', (req: Request, res: Response) => {
     logInfo('testimonial created', {
       name: created.name,
       rating: created.rating,
+      status: created.status,
       testimonialId: created.id,
       visitorId
     });
-    res.status(201).json(created);
+    res.status(202).json({
+      message: 'Thanks for the review. It has been submitted for approval.',
+      testimonial: created
+    });
   } catch (error) {
     logWarn('testimonial rejected', {
       name,
@@ -168,10 +212,46 @@ app.post('/api/testimonials', (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/testimonials/:testimonialId/moderate', (req: Request, res: Response) => {
+  if (!requireModerationToken(req, res)) {
+    return;
+  }
+
+  const testimonialId = req.params.testimonialId?.trim();
+  const action = req.body?.action;
+  const actorLabel = typeof req.body?.actorLabel === 'string' ? req.body.actorLabel.trim() : '';
+
+  if (!testimonialId) {
+    res.status(400).json({ error: 'testimonialId is required.' });
+    return;
+  }
+
+  if (action !== 'approve' && action !== 'reject') {
+    res.status(400).json({ error: 'action must be approve or reject.' });
+    return;
+  }
+
+  try {
+    const updated = statsStore.moderateTestimonial(testimonialId, action, actorLabel);
+    logInfo('testimonial moderated', {
+      action,
+      actorLabel: actorLabel || 'Admin',
+      status: updated.status,
+      testimonialId
+    });
+    res.json(updated);
+  } catch (error) {
+    res.status(404).json({
+      error: error instanceof Error ? error.message : 'Unable to moderate testimonial.'
+    });
+  }
+});
+
 statsStore.initialize().then(() => {
   app.listen(port, () => {
     logInfo('backend server started', {
       allowedOrigins,
+      moderationEnabled: Boolean(moderationToken),
       port
     });
   });

@@ -2,9 +2,13 @@
 
 <script setup lang="ts">
 import { ref, computed, reactive, shallowRef, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { type CSSProperties } from 'vue';
+import { type ComponentPublicInstance, type CSSProperties } from 'vue';
 import { useDisplay, useTheme } from 'vuetify';
 import Cookies from 'js-cookie';
+import ChatEditorPanel from '@/components/ChatEditorPanel.vue';
+import GuidedTutorialPanel from '@/components/GuidedTutorialPanel.vue';
+import KeyboardShortcutsDialog from '@/components/KeyboardShortcutsDialog.vue';
+import UtilitySidebar from '@/components/UtilitySidebar.vue';
 import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useAnalytics } from '@/composables/useAnalytics';
 import { copyTextToClipboard, uploadImageToImgBb } from '@/composables/useImageHosting';
@@ -24,7 +28,8 @@ import {
   type PendingEditorAction,
   type PortableProjectFile,
   type ProjectRecord,
-  type SwatchEntry
+  type SwatchEntry,
+  type TutorialStep
 } from '@/features/magician/types';
 import {
   DEFAULT_CHAT_LINE_WIDTH,
@@ -120,6 +125,9 @@ const customColorSwatches = ref<string[]>([]);
 const imageEffects = ref<ImageEffectLayer[]>([]);
 const dontShowTutorialAgain = ref(false);
 const tutorialStepIndex = ref(0);
+const tutorialDemoStarted = ref(false);
+const tutorialDemoReady = ref(false);
+const isApplyingTutorialDemoState = ref(false);
 const imageHostImgBbApiKey = ref('');
 const isImageHostUploadInProgress = ref(false);
 const lastUploadedImageUrl = ref('');
@@ -274,6 +282,7 @@ const characterName = ref('');
 
 // Watch character name changes and save to cookie
 watch(characterName, (newValue) => {
+  if (isApplyingTutorialDemoState.value) return;
   Cookies.set('characterName', newValue, { expires: 365 }); // Save for 1 year
 });
 
@@ -332,6 +341,19 @@ const handleImageLayerRailWheel = (event: WheelEvent) => {
   event.preventDefault();
   event.stopPropagation();
   utilityScrollElement.scrollTop += deltaY;
+};
+
+const setUtilityPanelScrollElement = (element: Element | ComponentPublicInstance | null) => {
+  utilityPanelScrollRef.value = element instanceof HTMLElement ? element : null;
+};
+
+const setMinimapElement = (element: Element | ComponentPublicInstance | null) => {
+  minimapRef.value = element instanceof HTMLElement ? element : null;
+};
+
+const updateActiveImageOverlayOpacity = (value: number) => {
+  if (!activeImageOverlay.value) return;
+  activeImageOverlay.value.opacity = value;
 };
 
 // Computed style for the drop zone
@@ -3030,9 +3052,319 @@ const loadCharacterName = () => {
   }
 };
 
+const createSvgDataUrl = (svg: string) =>
+  `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+
+const tutorialDemoScreenshotSrc = createSvgDataUrl(`
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26364f"/>
+      <stop offset="0.58" stop-color="#5f5d71"/>
+      <stop offset="1" stop-color="#14171e"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d4048"/>
+      <stop offset="1" stop-color="#17191f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#sky)"/>
+  <rect y="455" width="1280" height="265" fill="url(#road)"/>
+  <path d="M0 455h1280" stroke="#d7a35b" stroke-width="5" opacity=".7"/>
+  <path d="M160 720 505 455h112l-160 265zM820 455h104l226 265H944z" fill="#242730" opacity=".9"/>
+  <g opacity=".95">
+    <rect x="92" y="260" width="210" height="195" fill="#1b2230"/>
+    <rect x="112" y="285" width="40" height="44" fill="#f4cc74"/>
+    <rect x="170" y="285" width="40" height="44" fill="#7db4d8"/>
+    <rect x="228" y="285" width="40" height="44" fill="#f4cc74"/>
+    <rect x="114" y="352" width="154" height="24" fill="#ff6b62"/>
+  </g>
+  <g opacity=".92">
+    <rect x="920" y="205" width="205" height="250" fill="#202838"/>
+    <rect x="946" y="237" width="52" height="58" fill="#8dc7e7"/>
+    <rect x="1017" y="237" width="52" height="58" fill="#f0c86c"/>
+    <rect x="946" y="319" width="123" height="48" fill="#293447"/>
+  </g>
+  <g>
+    <rect x="555" y="382" width="226" height="76" rx="12" fill="#111827"/>
+    <rect x="584" y="345" width="168" height="65" rx="14" fill="#253044"/>
+    <circle cx="604" cy="468" r="28" fill="#0d1117"/>
+    <circle cx="733" cy="468" r="28" fill="#0d1117"/>
+    <rect x="606" y="360" width="118" height="42" rx="9" fill="#9cc7e5"/>
+    <rect x="535" y="420" width="270" height="20" rx="10" fill="#d3473e"/>
+  </g>
+  <g opacity=".74">
+    <circle cx="550" cy="170" r="36" fill="#fff4b8"/>
+    <rect x="513" y="170" width="74" height="14" fill="#fff4b8"/>
+  </g>
+  <text x="42" y="58" font-family="Arial Black, Arial, sans-serif" font-size="30" fill="#f8fafc">Demo Scene</text>
+  <text x="42" y="92" font-family="Arial, sans-serif" font-size="18" fill="#dbeafe">Screenshot Magician walkthrough canvas</text>
+</svg>`);
+
+const tutorialDemoOverlaySrc = createSvgDataUrl(`
+<svg xmlns="http://www.w3.org/2000/svg" width="260" height="88" viewBox="0 0 260 88">
+  <rect width="260" height="88" rx="18" fill="#101820" opacity=".92"/>
+  <rect x="12" y="12" width="236" height="64" rx="14" fill="#192536" stroke="#7dd3fc" stroke-width="2"/>
+  <text x="130" y="40" text-anchor="middle" font-family="Arial Black, Arial, sans-serif" font-size="20" fill="#f8fafc">SSMAG</text>
+  <text x="130" y="62" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#bae6fd">image overlay layer</text>
+</svg>`);
+
+const tutorialDemoChatText = [
+  '[21:14:11] Avery Stone says: secret code is 4812.',
+  '[21:14:17] * Avery Stone slides a note across the counter.',
+  '[21:14:21] [INFO]: Screenshot Magician colored this marker automatically.',
+  '[21:14:30] (( (PM) Try moving this chat layer with the arrow keys. ))',
+  '[21:14:39] You received $250 from Marcus Hale.'
+].join('\n');
+
+const createTutorialDemoSnapshot = (): EditorStateSnapshot => ({
+  characterName: 'Avery Stone',
+  chatlogText: tutorialDemoChatText,
+  droppedImageSrc: tutorialDemoScreenshotSrc,
+  dropZoneWidth: 1280,
+  dropZoneHeight: 720,
+  imageTransform: { x: 0, y: 0, scale: 1 },
+  imageOverlays: [
+    {
+      id: 'tutorial-overlay-badge',
+      name: 'Demo Badge',
+      src: tutorialDemoOverlaySrc,
+      sourceWidth: 260,
+      sourceHeight: 88,
+      maskDataUrl: null,
+      transform: { x: 948, y: 42, scale: 0.82 },
+      opacity: 0.92,
+      acceptsEffects: false,
+      isHidden: false,
+      isLocked: false
+    }
+  ],
+  activeImageOverlayId: null,
+  imageEffects: [],
+  chatOverlays: [
+    {
+      id: 'tutorial-chat-main',
+      name: 'Demo Chat Draft',
+      rawText: tutorialDemoChatText,
+      parsedLines: [],
+      transform: { x: 52, y: 392, scale: 1 },
+      censoredRegions: [],
+      manualColorRegions: [],
+      lineWidth: 780,
+      isHidden: false,
+      isLocked: false
+    }
+  ],
+  activeChatOverlayId: 'tutorial-chat-main',
+  isImageDraggingEnabled: false,
+  isChatDraggingEnabled: false,
+  showBlackBars: true,
+  selectedText: { ...DEFAULT_SELECTED_TEXT },
+  chatLineWidth: 780
+});
+
+const hasAnyEditorWork = () =>
+  Boolean(droppedImageSrc.value)
+  || chatlogText.value.trim().length > 0
+  || chatOverlays.value.length > 0
+  || imageOverlays.value.length > 0
+  || imageEffects.value.length > 0;
+
+const startTutorialDemo = () => {
+  const demoSnapshot = createTutorialDemoSnapshot();
+  isApplyingTutorialDemoState.value = true;
+  applyEditorSnapshot(demoSnapshot);
+  currentProjectId.value = null;
+  currentProjectName.value = 'Tutorial Demo';
+  pendingProjectName.value = 'Tutorial Demo';
+  tutorialDemoStarted.value = true;
+  tutorialDemoReady.value = false;
+  showNewSessionDialog.value = false;
+  showUnsavedChangesDialog.value = false;
+  pendingEditorAction.value = null;
+  resetHistoryState(demoSnapshot);
+  scheduleDropzoneScaleCalculation();
+  void nextTick(() => {
+    isApplyingTutorialDemoState.value = false;
+  });
+  showEditorNotice('Loaded a demo project for the walkthrough.', 'success');
+};
+
+const currentTutorialStep = computed(() => tutorialSteps[tutorialStepIndex.value]);
+
+const isTutorialActive = computed(() => showTutorialDialog.value);
+
+const tutorialTargetClass = computed(() =>
+  isTutorialActive.value ? `tutorial-target-${currentTutorialStep.value?.target || 'canvas'}` : ''
+);
+
+const isTutorialTarget = (target: TutorialStep['target']) =>
+  isTutorialActive.value && currentTutorialStep.value?.target === target;
+
+const hasParsedTutorialChat = computed(() =>
+  chatOverlays.value.some((overlay) => overlay.id === 'tutorial-chat-main' && overlay.parsedLines.length > 0)
+);
+
+const hasMovedTutorialChat = computed(() => {
+  const overlay = chatOverlays.value.find((item) => item.id === 'tutorial-chat-main');
+  if (!overlay) return false;
+
+  return (
+    overlay.transform.x !== 52
+    || overlay.transform.y !== 392
+    || overlay.transform.scale !== 1
+    || isChatDraggingEnabled.value
+  );
+});
+
+const hasTutorialCensor = computed(() =>
+  chatOverlays.value.some((overlay) => overlay.id === 'tutorial-chat-main' && overlay.censoredRegions.length > 0)
+);
+
+const hasTutorialPolish = computed(() =>
+  imageOverlays.value.length > 0 && imageEffects.value.some((effect) => effect.presetId === 'vignette')
+);
+
+const isCurrentTutorialStepComplete = computed(() => {
+  switch (tutorialStepIndex.value) {
+    case 0:
+      return tutorialDemoStarted.value && Boolean(droppedImageSrc.value);
+    case 1:
+      return hasParsedTutorialChat.value;
+    case 2:
+      return hasMovedTutorialChat.value;
+    case 3:
+      return hasTutorialCensor.value;
+    case 4:
+      return hasTutorialPolish.value;
+    default:
+      return tutorialDemoReady.value;
+  }
+});
+
+const shouldHighlightChatMoveControl = computed(() =>
+  isTutorialActive.value && tutorialStepIndex.value === 2
+);
+
+const shouldHighlightDemoLoadControl = computed(() =>
+  isTutorialActive.value && tutorialStepIndex.value === 0
+);
+
+const shouldHighlightParseControls = computed(() =>
+  isTutorialActive.value && tutorialStepIndex.value === 1
+);
+
+const shouldHighlightCensorControls = computed(() =>
+  isTutorialActive.value && tutorialStepIndex.value === 3
+);
+
+const shouldHighlightPolishControls = computed(() =>
+  isTutorialActive.value && tutorialStepIndex.value === 4
+);
+
+const shouldHighlightFinishControls = computed(() =>
+  isTutorialActive.value && tutorialStepIndex.value === tutorialSteps.length - 1
+);
+
+const parseTutorialChat = () => {
+  const tutorialOverlay = chatOverlays.value.find((overlay) => overlay.id === 'tutorial-chat-main');
+  if (!tutorialOverlay) {
+    startTutorialDemo();
+  }
+
+  selectChatOverlay('tutorial-chat-main');
+  chatlogText.value = tutorialDemoChatText;
+  parseChatlog();
+};
+
+const enableTutorialChatMove = () => {
+  if (!hasParsedTutorialChat.value) {
+    parseTutorialChat();
+  }
+
+  selectChatOverlay('tutorial-chat-main');
+  isChatDraggingEnabled.value = true;
+  isImageDraggingEnabled.value = false;
+  showEditorNotice('Chat move mode is on. Drag the chat or use arrow keys to nudge it.', 'info');
+};
+
+const censorTutorialPhrase = () => {
+  if (!hasParsedTutorialChat.value) {
+    parseTutorialChat();
+  }
+
+  const overlay = chatOverlays.value.find((item) => item.id === 'tutorial-chat-main');
+  if (!overlay) return;
+
+  const lineText = overlay.parsedLines[0]?.text ?? '';
+  const phrase = 'secret code';
+  const startOffset = lineText.indexOf(phrase);
+  if (startOffset === -1) return;
+
+  selectChatOverlay(overlay.id);
+  Object.assign(selectedText, {
+    lineIndex: 0,
+    startOffset,
+    endOffset: startOffset + phrase.length,
+    text: phrase
+  });
+  applyCensorType(CensorType.BlackBar);
+  showEditorNotice('Applied a black bar to the demo phrase.', 'success');
+};
+
+const addTutorialPolish = () => {
+  if (!hasParsedTutorialChat.value) {
+    parseTutorialChat();
+  }
+
+  if (!imageEffects.value.some((effect) => effect.presetId === 'vignette')) {
+    imageEffects.value.push(cloneImageEffectLayer({
+      presetId: 'vignette',
+      opacity: 0.42,
+      seed: createImageEffectSeed()
+    }));
+  }
+
+  selectImageOverlay('tutorial-overlay-badge');
+  showEditorNotice('Added a vignette and selected the demo image overlay.', 'success');
+};
+
+const markTutorialDemoReady = () => {
+  tutorialDemoReady.value = true;
+  showEditorNotice('The demo project is ready. Save it or export when you want.', 'success');
+};
+
+const runTutorialStepAction = () => {
+  switch (tutorialStepIndex.value) {
+    case 0:
+      startTutorialDemo();
+      break;
+    case 1:
+      parseTutorialChat();
+      break;
+    case 2:
+      enableTutorialChatMove();
+      break;
+    case 3:
+      censorTutorialPhrase();
+      break;
+    case 4:
+      addTutorialPolish();
+      break;
+    default:
+      markTutorialDemoReady();
+      break;
+  }
+};
+
 const openTutorial = () => {
   tutorialStepIndex.value = 0;
+  tutorialDemoStarted.value = currentProjectName.value === 'Tutorial Demo' && Boolean(droppedImageSrc.value);
+  tutorialDemoReady.value = false;
   showTutorialDialog.value = true;
+  if (!hasAnyEditorWork()) {
+    startTutorialDemo();
+  }
   trackEvent('tutorial_begin', {
     ...getAnalyticsContext()
   });
@@ -3091,6 +3423,7 @@ const loadSharePromptPreference = () => {
 
 const goToNextTutorialStep = () => {
   if (tutorialStepIndex.value >= tutorialSteps.length - 1) {
+    markTutorialDemoReady();
     trackEvent('tutorial_complete', {
       total_steps: tutorialSteps.length,
       ...getAnalyticsContext()
@@ -3406,11 +3739,17 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 </script>
 
 <template>
-  <div class="magician-wrapper">
+  <div :class="['magician-wrapper', { 'tutorial-active': isTutorialActive }, tutorialTargetClass]">
     <v-toolbar
       density="compact"
       color="surface-variant"
-      :class="['editor-toolbar', { 'editor-toolbar-compact': isCompactToolbar }]"
+      :class="[
+        'editor-toolbar',
+        {
+          'editor-toolbar-compact': isCompactToolbar,
+          'tutorial-spotlight-target': isTutorialTarget('toolbar') || isTutorialTarget('effects') || isTutorialTarget('project')
+        }
+      ]"
     >
       <template v-if="!isCompactToolbar">
       <div class="toolbar-button-group">
@@ -3460,7 +3799,12 @@ const preventNativePreviewDrag = (event: DragEvent) => {
         </v-tooltip>
         <v-tooltip text="Save Project (Ctrl+S)" location="bottom">
           <template v-slot:activator="{ props }">
-            <v-btn v-bind="props" icon="mdi-content-save-cog-outline" @click="saveCurrentProject"></v-btn>
+            <v-btn
+              v-bind="props"
+              icon="mdi-content-save-cog-outline"
+              :class="{ 'tutorial-control-highlight': shouldHighlightFinishControls }"
+              @click="saveCurrentProject"
+            ></v-btn>
           </template>
         </v-tooltip>
         <v-tooltip text="Keyboard Shortcuts (?)" location="bottom">
@@ -3566,6 +3910,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <v-btn 
               v-bind="props" 
               icon="mdi-message-text-lock-outline"
+              :class="{ 'tutorial-control-highlight': shouldHighlightChatMoveControl }"
               :color="isChatDraggingEnabled ? 'primary' : undefined"
               @click="toggleChatDrag"
             ></v-btn>
@@ -3591,6 +3936,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
           append-icon="mdi-chevron-down"
           text="Effects"
           class="text-none"
+          :class="{ 'tutorial-control-highlight': shouldHighlightPolishControls }"
           :color="imageEffects.length > 0 ? 'primary' : undefined"
           @click="showEffectsDialog = true"
         ></v-btn>
@@ -3602,6 +3948,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               append-icon="mdi-chevron-down"
               text="Censor"
               class="text-none"
+              :class="{ 'tutorial-control-highlight': shouldHighlightCensorControls }"
               :disabled="selectedText.lineIndex === -1"
             ></v-btn>
           </template>
@@ -3638,6 +3985,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <v-btn
               v-bind="props"
               icon="mdi-palette-outline"
+              :class="{ 'tutorial-control-highlight': shouldHighlightCensorControls }"
               @click="openColorDialog"
               :disabled="selectedText.lineIndex === -1"
             ></v-btn>
@@ -3648,6 +3996,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
             <v-btn 
               v-bind="props" 
               icon="mdi-content-save-outline"
+              :class="{ 'tutorial-control-highlight': shouldHighlightFinishControls }"
               @click="saveImage"
               :disabled="!droppedImageSrc"
             ></v-btn>
@@ -3716,7 +4065,12 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               </v-tooltip>
               <v-tooltip text="Save Project (Ctrl+S)" location="bottom">
                 <template v-slot:activator="{ props }">
-                  <v-btn v-bind="props" icon="mdi-content-save-cog-outline" @click="saveCurrentProject"></v-btn>
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-content-save-cog-outline"
+                    :class="{ 'tutorial-control-highlight': shouldHighlightFinishControls }"
+                    @click="saveCurrentProject"
+                  ></v-btn>
                 </template>
               </v-tooltip>
               <v-tooltip text="Keyboard Shortcuts (?)" location="bottom">
@@ -3841,6 +4195,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                   <v-btn
                     v-bind="props"
                     icon="mdi-message-text-lock-outline"
+                    :class="{ 'tutorial-control-highlight': shouldHighlightChatMoveControl }"
                     :color="isChatDraggingEnabled ? 'primary' : undefined"
                     @click="toggleChatDrag"
                   ></v-btn>
@@ -3860,13 +4215,14 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
             <div class="toolbar-button-group toolbar-button-group-wrap">
               <v-btn
-                prepend-icon="mdi-image-filter-center-focus"
-                append-icon="mdi-chevron-down"
-                text="Effects"
-                class="text-none"
-                :color="imageEffects.length > 0 ? 'primary' : undefined"
-                @click="showEffectsDialog = true"
-              ></v-btn>
+              prepend-icon="mdi-image-filter-center-focus"
+              append-icon="mdi-chevron-down"
+              text="Effects"
+              class="text-none"
+              :class="{ 'tutorial-control-highlight': shouldHighlightPolishControls }"
+              :color="imageEffects.length > 0 ? 'primary' : undefined"
+              @click="showEffectsDialog = true"
+            ></v-btn>
               <v-menu location="bottom">
                 <template v-slot:activator="{ props }">
                   <v-btn
@@ -3875,6 +4231,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                     append-icon="mdi-chevron-down"
                     text="Censor"
                     class="text-none"
+                    :class="{ 'tutorial-control-highlight': shouldHighlightCensorControls }"
                     :disabled="selectedText.lineIndex === -1"
                   ></v-btn>
                 </template>
@@ -3911,6 +4268,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                   <v-btn
                     v-bind="props"
                     icon="mdi-palette-outline"
+                    :class="{ 'tutorial-control-highlight': shouldHighlightCensorControls }"
                     @click="openColorDialog"
                     :disabled="selectedText.lineIndex === -1"
                   ></v-btn>
@@ -3921,6 +4279,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
                   <v-btn
                     v-bind="props"
                     icon="mdi-content-save-outline"
+                    :class="{ 'tutorial-control-highlight': shouldHighlightFinishControls }"
                     @click="saveImage"
                     :disabled="!droppedImageSrc"
                   ></v-btn>
@@ -4006,117 +4365,26 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       </v-card>
     </v-dialog>
 
-    <v-dialog v-model="showTutorialDialog" max-width="760">
-      <v-card class="tutorial-card">
-        <v-card-title class="d-flex align-center justify-space-between">
-          <div>
-            <div class="text-h6">Welcome to Screenshot Magician</div>
-            <div class="text-body-2 text-medium-emphasis">
-              A quick walkthrough so the editor feels easier to understand on first open.
-            </div>
-          </div>
-          <v-chip size="small" variant="tonal" color="primary">
-            Step {{ tutorialStepIndex + 1 }} / {{ tutorialSteps.length }}
-          </v-chip>
-        </v-card-title>
-        <v-card-text>
-          <v-window v-model="tutorialStepIndex" class="tutorial-window">
-            <v-window-item
-              v-for="(step, index) in tutorialSteps"
-              :key="step.title"
-              :value="index"
-            >
-              <div class="tutorial-step">
-                <div class="tutorial-icon-wrap">
-                  <v-icon :icon="step.icon" size="36"></v-icon>
-                </div>
-                <div class="text-h6 mb-3">{{ step.title }}</div>
-                <div class="text-body-1 text-medium-emphasis">
-                  {{ step.description }}
-                </div>
-              </div>
-            </v-window-item>
-          </v-window>
+    <GuidedTutorialPanel
+      v-if="showTutorialDialog && currentTutorialStep"
+      :current-step="currentTutorialStep"
+      :step-index="tutorialStepIndex"
+      :steps="tutorialSteps"
+      :is-current-step-complete="isCurrentTutorialStepComplete"
+      :dont-show-tutorial-again="dontShowTutorialAgain"
+      :should-highlight-action-button="shouldHighlightDemoLoadControl || shouldHighlightParseControls || shouldHighlightCensorControls || shouldHighlightPolishControls || shouldHighlightFinishControls"
+      @close="closeTutorial"
+      @back="goToPreviousTutorialStep"
+      @next="goToNextTutorialStep"
+      @run-action="runTutorialStepAction"
+      @update:step-index="tutorialStepIndex = $event"
+      @update:dont-show-tutorial-again="dontShowTutorialAgain = $event"
+    />
 
-          <div class="tutorial-progress mt-6">
-            <div
-              v-for="(step, index) in tutorialSteps"
-              :key="`${step.title}-dot`"
-              :class="['tutorial-progress-dot', { 'is-active': tutorialStepIndex === index }]"
-            ></div>
-          </div>
-        </v-card-text>
-        <v-card-actions class="tutorial-actions">
-          <v-checkbox
-            v-model="dontShowTutorialAgain"
-            label="Don't show this again"
-            density="compact"
-            hide-details
-          ></v-checkbox>
-          <v-spacer></v-spacer>
-          <v-btn variant="text" @click="closeTutorial">
-            I know what I'm doing
-          </v-btn>
-          <v-btn
-            variant="text"
-            :disabled="tutorialStepIndex === 0"
-            @click="goToPreviousTutorialStep"
-          >
-            Back
-          </v-btn>
-          <v-btn color="primary" @click="goToNextTutorialStep">
-            {{ tutorialStepIndex === tutorialSteps.length - 1 ? 'Finish' : 'Next' }}
-          </v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
-
-    <v-dialog v-model="showKeyboardShortcutsDialog" max-width="760">
-      <v-card class="shortcuts-card">
-        <v-card-title class="d-flex align-center justify-space-between">
-          <div>
-            <div class="text-h6">Keyboard Shortcuts</div>
-            <div class="text-body-2 text-medium-emphasis">
-              Faster editing, right where you already work.
-            </div>
-          </div>
-          <v-btn icon="mdi-close" variant="text" @click="showKeyboardShortcutsDialog = false"></v-btn>
-        </v-card-title>
-        <v-card-text>
-          <div class="shortcuts-grid">
-            <v-sheet
-              v-for="group in shortcutGroups"
-              :key="group.title"
-              class="shortcuts-group"
-              border
-              rounded="xl"
-            >
-              <div class="text-subtitle-1 mb-3">{{ group.title }}</div>
-              <div
-                v-for="shortcut in group.items"
-                :key="`${group.title}-${shortcut.label}`"
-                class="shortcut-row"
-              >
-                <div class="text-body-2">{{ shortcut.label }}</div>
-                <div class="shortcut-keys">
-                  <template v-for="(keyPart, index) in shortcut.keys" :key="`${shortcut.label}-${keyPart}-${index}`">
-                    <span class="shortcut-key">{{ keyPart }}</span>
-                    <span v-if="index < shortcut.keys.length - 1" class="shortcut-plus">+</span>
-                  </template>
-                </div>
-              </div>
-            </v-sheet>
-          </div>
-        </v-card-text>
-        <v-card-actions>
-          <div class="text-caption text-medium-emphasis px-4">
-            Arrow nudging and +/- zoom affect whichever drag mode is currently active.
-          </div>
-          <v-spacer></v-spacer>
-          <v-btn variant="text" @click="showKeyboardShortcutsDialog = false">Close</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
+    <KeyboardShortcutsDialog
+      v-model="showKeyboardShortcutsDialog"
+      :shortcut-groups="shortcutGroups"
+    />
 
     <v-dialog v-model="showSettingsDialog" max-width="900">
       <v-card>
@@ -4916,343 +5184,54 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 
     <!-- Row takes remaining height and full width. Padding applied here. -->
     <div class="layout-container pa-2" ref="parentRowRef">
-      <div class="utility-panel" :style="{ width: `${utilityPanelWidth}px` }">
-        <v-sheet class="utility-panel-sheet fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
-          <div ref="utilityPanelScrollRef" class="utility-panel-scroll">
-            <div class="project-status mb-3">
-              <div class="text-subtitle-2">Project</div>
-              <div class="text-body-2">
-                {{ currentProjectName || 'Unsaved session' }}
-              </div>
-              <div
-                class="text-caption text-medium-emphasis project-status-message"
-                :title="projectStatusMessage"
-              >
-                {{ projectStatusMessage }}
-              </div>
-            </div>
-            <v-sheet
-              v-if="showImageMinimap && droppedImageSrc"
-              class="image-minimap mb-3"
-              border
-              rounded="lg"
-            >
-              <div class="image-minimap-header">
-                <div>
-                  <div class="text-subtitle-2">Navigator</div>
-                  <div class="text-caption text-medium-emphasis">
-                    Click anywhere in the preview to recenter the screenshot.
-                  </div>
-                </div>
-                <v-btn
-                  size="x-small"
-                  variant="text"
-                  icon="mdi-fit-to-screen-outline"
-                  @click="resetImageView"
-                ></v-btn>
-              </div>
-              <div
-                ref="minimapRef"
-                class="image-minimap-frame"
-                :style="{ width: `${minimapSize.width}px`, height: `${minimapSize.height}px` }"
-                @click="recenterImageFromMinimap"
-              >
-              <img
-                :src="droppedImageSrc"
-                alt="Navigator preview"
-                class="image-minimap-preview"
-              />
-                <div
-                  class="image-minimap-viewport"
-                  :style="{
-                    left: `${minimapViewport.left}px`,
-                    top: `${minimapViewport.top}px`,
-                    width: `${minimapViewport.width}px`,
-                    height: `${minimapViewport.height}px`
-                  }"
-                ></div>
-              </div>
-            </v-sheet>
-            <div class="utility-panel-main">
-              <div class="utility-panel-section-header d-flex align-center justify-space-between mb-2">
-                <div class="text-subtitle-1">Image Layers</div>
-                <v-btn
-                  size="small"
-                  variant="tonal"
-                  color="primary"
-                  prepend-icon="mdi-image-multiple-outline"
-                  @click="triggerImageOverlayInput"
-                >
-                  Add Image
-                </v-btn>
-              </div>
-              <div
-                class="image-layer-scroll-region mb-3"
-                @wheel="handleImageLayerRailWheel"
-              >
-                <div class="chat-layer-list">
-                  <v-list density="compact" class="pa-0" bg-color="transparent">
-                    <v-list-item
-                      :active="activeImageOverlayId === null"
-                      rounded="lg"
-                      @click="selectImageOverlay(null)"
-                    >
-                      <template v-slot:prepend>
-                        <v-icon icon="mdi-image-outline" size="small"></v-icon>
-                      </template>
-                      <v-list-item-title>Base Screenshot</v-list-item-title>
-                      <v-list-item-subtitle>
-                        {{ droppedImageSrc ? 'Primary canvas image' : 'No screenshot loaded yet' }}
-                      </v-list-item-subtitle>
-                      <template v-slot:append>
-                        <v-btn
-                          icon="mdi-fit-to-screen-outline"
-                          size="x-small"
-                          variant="text"
-                          :disabled="!droppedImageSrc"
-                          @click.stop="resetImageView"
-                        ></v-btn>
-                      </template>
-                    </v-list-item>
-                    <v-list-item
-                      v-for="overlay in imageOverlays"
-                      :key="overlay.id"
-                      :active="overlay.id === activeImageOverlayId"
-                      class="image-layer-list-item"
-                      rounded="lg"
-                      @click="selectImageOverlay(overlay.id)"
-                    >
-                      <template v-slot:prepend>
-                        <div class="image-layer-thumbnail-wrap">
-                          <img
-                            :src="overlay.src"
-                            :alt="overlay.name"
-                            class="image-layer-thumbnail"
-                          />
-                          <div v-if="overlay.isHidden" class="image-layer-thumbnail-badge">
-                            <v-icon icon="mdi-eye-off-outline" size="x-small"></v-icon>
-                          </div>
-                        </div>
-                      </template>
-                      <div class="image-layer-item-main">
-                        <div class="image-layer-item-name" :title="overlay.name">
-                          {{ overlay.name }}
-                        </div>
-                        <div class="image-layer-item-meta">
-                          Layer {{ imageOverlays.findIndex((item) => item.id === overlay.id) + 1 }} of {{ imageOverlays.length }} · {{ Math.round(overlay.opacity * 100) }}% opacity
-                          <span>{{ overlay.acceptsEffects ? ' • Effects On' : ' • Effects Off' }}</span>
-                          <span v-if="overlay.maskDataUrl"> • Masked</span>
-                          <span v-if="overlay.isHidden"> • Hidden</span>
-                          <span v-if="overlay.isLocked"> • Locked</span>
-                        </div>
-                        <div class="image-layer-item-actions">
-                          <v-tooltip text="Move this layer higher in the stack" location="top">
-                            <template v-slot:activator="{ props }">
-                              <v-btn
-                                v-bind="props"
-                                icon="mdi-arrow-down-bold-outline"
-                                size="x-small"
-                                variant="text"
-                                :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === imageOverlays.length - 1"
-                                @click.stop="moveImageOverlay(overlay.id, 'forward')"
-                              ></v-btn>
-                            </template>
-                          </v-tooltip>
-                          <v-tooltip text="Move this layer lower in the stack" location="top">
-                            <template v-slot:activator="{ props }">
-                              <v-btn
-                                v-bind="props"
-                                icon="mdi-arrow-up-bold-outline"
-                                size="x-small"
-                                variant="text"
-                                :disabled="imageOverlays.findIndex((item) => item.id === overlay.id) === 0"
-                                @click.stop="moveImageOverlay(overlay.id, 'backward')"
-                              ></v-btn>
-                            </template>
-                          </v-tooltip>
-                          <v-tooltip :text="overlay.acceptsEffects ? 'Effects are enabled for this layer' : 'Effects are disabled for this layer'" location="top">
-                            <template v-slot:activator="{ props }">
-                              <v-btn
-                                v-bind="props"
-                                :icon="overlay.acceptsEffects ? 'mdi-image-filter-center-focus' : 'mdi-image-filter-center-focus-weak'"
-                                size="x-small"
-                                variant="text"
-                                :color="overlay.acceptsEffects ? 'primary' : undefined"
-                                @click.stop="toggleImageOverlayEffects(overlay.id)"
-                              ></v-btn>
-                            </template>
-                          </v-tooltip>
-                          <v-tooltip :text="overlay.isHidden ? 'Show this layer' : 'Hide this layer'" location="top">
-                            <template v-slot:activator="{ props }">
-                              <v-btn
-                                v-bind="props"
-                                :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
-                                size="x-small"
-                                variant="text"
-                                @click.stop="toggleImageOverlayVisibility(overlay.id)"
-                              ></v-btn>
-                            </template>
-                          </v-tooltip>
-                          <v-tooltip :text="overlay.isLocked ? 'Unlock this layer for editing' : 'Lock this layer to prevent editing'" location="top">
-                            <template v-slot:activator="{ props }">
-                              <v-btn
-                                v-bind="props"
-                                :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
-                                size="x-small"
-                                variant="text"
-                                @click.stop="toggleImageOverlayLock(overlay.id)"
-                              ></v-btn>
-                            </template>
-                          </v-tooltip>
-                          <v-tooltip text="Duplicate this layer" location="top">
-                            <template v-slot:activator="{ props }">
-                              <v-btn
-                                v-bind="props"
-                                icon="mdi-content-copy"
-                                size="x-small"
-                                variant="text"
-                                @click.stop="duplicateImageOverlay(overlay.id)"
-                              ></v-btn>
-                            </template>
-                          </v-tooltip>
-                          <v-tooltip text="Delete this layer" location="top">
-                            <template v-slot:activator="{ props }">
-                              <v-btn
-                                v-bind="props"
-                                icon="mdi-delete-outline"
-                                size="x-small"
-                                variant="text"
-                                color="error"
-                                @click.stop="removeImageOverlay(overlay.id)"
-                              ></v-btn>
-                            </template>
-                          </v-tooltip>
-                        </div>
-                      </div>
-                    </v-list-item>
-                  </v-list>
-                  <div v-if="imageOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
-                    Add PNG, JPG, WEBP, or any browser-supported image to stack props, decals, or cutouts over the screenshot.
-                  </div>
-                </div>
-              </div>
-            </div>
-            <v-sheet
-              v-if="activeImageOverlay"
-              class="censored-region-panel image-layer-detail-panel"
-              border
-              rounded="lg"
-            >
-            <div class="image-layer-detail-header mb-2">
-              <div class="image-layer-detail-header-copy">
-                <div class="text-subtitle-2">Selected Image Layer</div>
-                <div class="text-caption text-medium-emphasis">
-                  Drag, resize with the mouse wheel, or use arrows and +/- while Image Drag is enabled.
-                </div>
-              </div>
-              <div class="selected-image-layer-name" :title="activeImageOverlay.name">
-                {{ activeImageOverlay.name }}
-              </div>
-            </div>
-            <div class="text-caption text-medium-emphasis mb-1">Opacity</div>
-            <v-slider
-              v-model="activeImageOverlay.opacity"
-              min="0.05"
-              max="1"
-              step="0.01"
-              hide-details
-              color="primary"
-            ></v-slider>
-            <div class="d-flex align-center justify-space-between text-caption mb-2">
-              <span>{{ Math.round(activeImageOverlay.opacity * 100) }}%</span>
-              <v-btn
-                size="x-small"
-                variant="text"
-                prepend-icon="mdi-fit-to-screen-outline"
-                @click="resetActiveImageOverlayView"
-              >
-                Reset Layer
-              </v-btn>
-            </div>
-            <div class="text-caption text-medium-emphasis image-mask-mode-copy mb-2">
-              Move keeps drag and zoom active. Erase and Restore paint a non-destructive layer mask.
-            </div>
-            <v-btn-toggle
-              :model-value="imageOverlayTool"
-              color="primary"
-              density="compact"
-              divided
-              mandatory
-              class="image-mask-tool-toggle mb-3"
-              @update:model-value="setImageOverlayTool(($event as ImageOverlayTool) || 'move')"
-            >
-              <v-btn value="move" size="small" prepend-icon="mdi-cursor-move" class="image-mask-tool-button">
-                Move
-              </v-btn>
-              <v-btn value="erase" size="small" prepend-icon="mdi-eraser-variant" class="image-mask-tool-button">
-                Erase
-              </v-btn>
-              <v-btn value="restore" size="small" prepend-icon="mdi-brush" class="image-mask-tool-button">
-                Restore
-              </v-btn>
-            </v-btn-toggle>
-            <div class="text-caption text-medium-emphasis mb-1">Brush Size</div>
-            <v-slider
-              v-model="imageMaskBrushSize"
-              min="8"
-              max="640"
-              step="1"
-              hide-details
-              color="primary"
-            ></v-slider>
-            <div class="image-mask-value-row text-caption mb-1">
-              <span>{{ imageMaskBrushSize }} px</span>
-            </div>
-            <div class="text-caption text-medium-emphasis image-mask-helper-copy mb-2">
-              Mouse wheel over the selected layer adjusts brush size.
-            </div>
-            <div class="text-caption text-medium-emphasis mb-1">Softness</div>
-            <v-slider
-              v-model="imageMaskBrushSoftness"
-              min="0"
-              max="1"
-              step="0.01"
-              hide-details
-              color="primary"
-            ></v-slider>
-            <div class="image-mask-value-row text-caption mb-1">
-              <span>{{ Math.round(imageMaskBrushSoftness * 100) }}%</span>
-            </div>
-            <div class="text-caption text-medium-emphasis image-mask-helper-copy mb-2">
-              Softer edges create a smoother blend into the layer below.
-            </div>
-            <div class="text-caption text-medium-emphasis mb-1">Strength</div>
-            <v-slider
-              v-model="imageMaskBrushStrength"
-              min="0.05"
-              max="1"
-              step="0.01"
-              hide-details
-              color="primary"
-            ></v-slider>
-            <div class="image-mask-action-row text-caption">
-              <span>{{ Math.round(imageMaskBrushStrength * 100) }}%</span>
-              <v-btn
-                size="x-small"
-                variant="text"
-                prepend-icon="mdi-layers-remove-outline"
-                :disabled="!activeImageOverlayHasMask"
-                @click="resetActiveImageOverlayMask"
-              >
-                Clear Mask
-              </v-btn>
-            </div>
-            </v-sheet>
-          </div>
-        </v-sheet>
+      <div
+        :class="['utility-panel', { 'tutorial-spotlight-target': isTutorialTarget('utility-panel') || isTutorialTarget('project') }]"
+        :style="{ width: `${utilityPanelWidth}px` }"
+      >
+        <UtilitySidebar
+          :active-image-overlay="activeImageOverlay"
+          :active-image-overlay-has-mask="activeImageOverlayHasMask"
+          :active-image-overlay-id="activeImageOverlayId"
+          :current-project-name="currentProjectName"
+          :dropped-image-src="droppedImageSrc"
+          :image-mask-brush-size="imageMaskBrushSize"
+          :image-mask-brush-softness="imageMaskBrushSoftness"
+          :image-mask-brush-strength="imageMaskBrushStrength"
+          :image-overlay-tool="imageOverlayTool"
+          :image-overlays="imageOverlays"
+          :minimap-ref-setter="setMinimapElement"
+          :minimap-size="minimapSize"
+          :minimap-viewport="minimapViewport"
+          :project-status-message="projectStatusMessage"
+          :should-highlight-finish-controls="shouldHighlightFinishControls"
+          :should-highlight-polish-controls="shouldHighlightPolishControls"
+          :show-image-minimap="showImageMinimap"
+          :utility-panel-scroll-ref-setter="setUtilityPanelScrollElement"
+          @trigger-image-overlay-input="triggerImageOverlayInput"
+          @reset-image-view="resetImageView"
+          @recenter-image-from-minimap="recenterImageFromMinimap"
+          @handle-image-layer-rail-wheel="handleImageLayerRailWheel"
+          @select-image-overlay="selectImageOverlay"
+          @move-image-overlay="moveImageOverlay($event.overlayId, $event.direction)"
+          @toggle-image-overlay-effects="toggleImageOverlayEffects"
+          @toggle-image-overlay-visibility="toggleImageOverlayVisibility"
+          @toggle-image-overlay-lock="toggleImageOverlayLock"
+          @duplicate-image-overlay="duplicateImageOverlay"
+          @remove-image-overlay="removeImageOverlay"
+          @update:active-image-overlay-opacity="updateActiveImageOverlayOpacity"
+          @reset-active-image-overlay-view="resetActiveImageOverlayView"
+          @update:image-overlay-tool="setImageOverlayTool"
+          @update:image-mask-brush-size="imageMaskBrushSize = $event"
+          @update:image-mask-brush-softness="imageMaskBrushSoftness = $event"
+          @update:image-mask-brush-strength="imageMaskBrushStrength = $event"
+          @reset-active-image-overlay-mask="resetActiveImageOverlayMask"
+        />
       </div>
 
-      <div class="main-content" ref="contentAreaRef">
+      <div
+        ref="contentAreaRef"
+        :class="['main-content', { 'tutorial-spotlight-target': isTutorialTarget('canvas') }]"
+      >
         <!-- Add aspect ratio container to enforce proper ratio -->
         <div class="aspect-ratio-container" :style="aspectRatioContainerStyle">
           <v-sheet 
@@ -5373,7 +5352,7 @@ const preventNativePreviewDrag = (event: DragEvent) => {
               v-show="overlay.parsedLines.length > 0 && droppedImageSrc && !overlay.isHidden"
               :ref="(element) => setChatOverlayElement(overlay.id, element)"
               :key="`${overlay.id}-${renderKey}`"
-              class="chat-overlay"
+              :class="['chat-overlay', { 'tutorial-control-highlight': shouldHighlightChatMoveControl && overlay.id === activeChatOverlayId }]"
               @pointerdown.stop="handleChatMouseDown($event, overlay.id)"
               @dblclick.stop.prevent="enableChatDragFromCanvas($event, overlay.id)"
               @wheel="handleChatWheel($event, overlay.id)"
@@ -5410,185 +5389,33 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       ></div>
 
       <!-- Right side chatlog panel -->
-      <div class="chatlog-panel" ref="chatPanelRef" :style="{ width: chatPanelFlexBasis }">
-        <v-sheet class="chatlog-panel-sheet fill-height d-flex flex-column pa-2" style="border-radius: 4px;">
-          <div class="d-flex align-center justify-space-between mb-2">
-            <div class="text-subtitle-1">Chat Layers</div>
-            <v-btn
-              size="small"
-              variant="tonal"
-              color="primary"
-              prepend-icon="mdi-plus"
-              @click="startNewChatLayer"
-            >
-              New Chat
-            </v-btn>
-          </div>
-          <div class="chat-layer-list mb-3">
-            <v-list density="compact" class="pa-0" bg-color="transparent">
-              <v-list-item
-                v-for="overlay in chatOverlays"
-                :key="overlay.id"
-                :active="overlay.id === activeChatOverlayId"
-                rounded="lg"
-                @click="selectChatOverlay(overlay.id)"
-              >
-                <template v-slot:prepend>
-                  <v-icon :icon="overlay.isHidden ? 'mdi-message-off-outline' : 'mdi-message-text-outline'" size="small"></v-icon>
-                </template>
-                <v-list-item-title>{{ overlay.name }}</v-list-item-title>
-                <v-list-item-subtitle>
-                  {{ overlay.parsedLines.length }} lines
-                  <span v-if="overlay.isHidden"> • Hidden</span>
-                  <span v-if="overlay.isLocked"> • Locked</span>
-                </v-list-item-subtitle>
-                <template v-slot:append>
-                  <div class="d-flex align-center ga-1">
-                    <v-btn
-                      :icon="overlay.isHidden ? 'mdi-eye-outline' : 'mdi-eye-off-outline'"
-                      size="x-small"
-                      variant="text"
-                      @click.stop="toggleChatOverlayVisibility(overlay.id)"
-                    ></v-btn>
-                    <v-btn
-                      :icon="overlay.isLocked ? 'mdi-lock-open-variant-outline' : 'mdi-lock-outline'"
-                      size="x-small"
-                      variant="text"
-                      @click.stop="toggleChatOverlayLock(overlay.id)"
-                    ></v-btn>
-                    <v-btn
-                      icon="mdi-content-copy"
-                      size="x-small"
-                      variant="text"
-                      @click.stop="duplicateChatOverlay(overlay.id)"
-                    ></v-btn>
-                    <v-btn
-                      icon="mdi-delete-outline"
-                      size="x-small"
-                      variant="text"
-                      color="error"
-                      @click.stop="removeChatOverlay(overlay.id)"
-                    ></v-btn>
-                  </div>
-                </template>
-              </v-list-item>
-            </v-list>
-            <div v-if="chatOverlays.length === 0" class="text-caption text-medium-emphasis pa-2">
-              Parse a chatlog to create your first movable chat layer.
-            </div>
-          </div>
-          <div class="d-flex align-center justify-space-between mb-1">
-            <div class="text-subtitle-2">
-              {{ activeChatOverlay ? 'Edit Selected Chat' : 'New Chat Draft' }}
-            </div>
-            <v-chip size="small" variant="outlined">
-              {{ activeChatOverlay ? 'Selected' : 'Unparsed' }}
-            </v-chip>
-          </div>
-          <div class="flex-grow-1 d-flex flex-column" style="overflow-y: hidden;">
-            <v-textarea
-              v-model="chatlogText"
-              :placeholder="activeChatOverlay
-                ? 'Edit the selected chat layer, then hit Parse or Ctrl+Enter to update it.'
-                : 'Paste a new chatlog here, then hit Parse or Ctrl+Enter to add it as a new layer.'"
-              class="chatlog-textarea mb-1"
-              density="compact"
-              variant="outlined"
-              hide-details
-              no-resize
-              @keyup.ctrl.enter="parseChatlog"
-              @mouseup="handleTextSelection"
-              @select="handleTextSelection"
-              @keyup="handleTextSelection"
-            ></v-textarea>
-          </div>
-          <v-sheet
-            v-if="activeChatOverlay"
-            class="censored-region-panel mb-2"
-            border
-            rounded="lg"
-          >
-            <div class="d-flex align-center justify-space-between mb-2">
-              <div>
-                <div class="text-subtitle-2">Censored Selections</div>
-                <div class="text-caption text-medium-emphasis">
-                  Review what is hidden and remove any item directly from this list.
-                </div>
-              </div>
-              <v-chip size="small" variant="tonal">
-                {{ activeCensoredRegionSummaries.length }}
-              </v-chip>
-            </div>
-
-            <div v-if="activeCensoredRegionSummaries.length === 0" class="text-caption text-medium-emphasis">
-              No censoring has been applied to this chat yet. Select text above to add one.
-            </div>
-
-            <v-list
-              v-else
-              density="compact"
-              class="censored-region-list pa-0"
-              bg-color="transparent"
-            >
-              <v-list-item
-                v-for="region in activeCensoredRegionSummaries"
-                :key="region.id"
-                class="censored-region-item"
-                :active="isRegionSelected(region)"
-                rounded="lg"
-                @click="focusCensoredRegion(region)"
-              >
-                <v-list-item-title class="text-body-2">
-                  {{ region.preview }}
-                </v-list-item-title>
-                <v-list-item-subtitle>
-                  {{ region.label }}
-                </v-list-item-subtitle>
-                <template v-slot:append>
-                  <div class="d-flex align-center ga-1">
-                    <v-btn
-                      icon="mdi-crosshairs"
-                      size="x-small"
-                      variant="text"
-                      @click.stop="focusCensoredRegion(region)"
-                    ></v-btn>
-                    <v-btn
-                      icon="mdi-close-circle-outline"
-                      size="x-small"
-                      variant="text"
-                      color="error"
-                      @click.stop="removeCensoredRegion(region)"
-                    ></v-btn>
-                  </div>
-                </template>
-              </v-list-item>
-            </v-list>
-          </v-sheet>
-          <div class="mt-auto pt-1">
-            <v-row no-gutters>
-              <v-col class="pe-1">
-                <v-btn
-                  color="grey-darken-3"
-                  block
-                  @click="clearChatlog"
-                  density="compact"
-                >
-                  Clear
-                </v-btn>
-              </v-col>
-              <v-col class="ps-1">
-                <v-btn
-                  color="grey-darken-3"
-                  block
-                  @click="parseChatlog"
-                  density="compact"
-                >
-                  {{ activeChatOverlay ? 'Update' : 'Parse' }}
-                </v-btn>
-              </v-col>
-            </v-row>
-          </div>
-        </v-sheet>
+      <div
+        ref="chatPanelRef"
+        :class="['chatlog-panel', { 'tutorial-spotlight-target': isTutorialTarget('chat-panel') }]"
+        :style="{ width: chatPanelFlexBasis }"
+      >
+        <ChatEditorPanel
+          :active-chat-overlay="activeChatOverlay"
+          :active-chat-overlay-id="activeChatOverlayId"
+          :active-censored-region-summaries="activeCensoredRegionSummaries"
+          :chat-overlays="chatOverlays"
+          :chatlog-text="chatlogText"
+          :is-region-selected="isRegionSelected"
+          :should-highlight-censor-controls="shouldHighlightCensorControls"
+          :should-highlight-parse-controls="shouldHighlightParseControls"
+          @update:chatlog-text="chatlogText = $event"
+          @start-new-chat-layer="startNewChatLayer"
+          @select-chat-overlay="selectChatOverlay"
+          @toggle-chat-overlay-visibility="toggleChatOverlayVisibility"
+          @toggle-chat-overlay-lock="toggleChatOverlayLock"
+          @duplicate-chat-overlay="duplicateChatOverlay"
+          @remove-chat-overlay="removeChatOverlay"
+          @parse-chatlog="parseChatlog"
+          @clear-chatlog="clearChatlog"
+          @handle-text-selection="handleTextSelection"
+          @focus-censored-region="focusCensoredRegion"
+          @remove-censored-region="removeCensoredRegion"
+        />
       </div>
     </div>
   </div>
@@ -5711,50 +5538,6 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   object-fit: initial;
 }
 
-.image-mask-tool-toggle {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0;
-}
-
-.image-mask-tool-button {
-  min-width: 0;
-  letter-spacing: 0.02em;
-}
-
-.image-mask-tool-toggle :deep(.v-btn) {
-  min-width: 0;
-  padding-inline: 10px;
-}
-
-.image-mask-tool-toggle :deep(.v-btn__content) {
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-}
-
-.image-mask-mode-copy {
-  line-height: 1.45;
-}
-
-.image-mask-value-row,
-.image-mask-action-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.image-mask-value-row {
-  min-height: 20px;
-}
-
-.image-mask-helper-copy {
-  line-height: 1.35;
-}
-
 .image-mask-brush-preview {
   position: absolute;
   transform: translate(-50%, -50%);
@@ -5770,200 +5553,6 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   backdrop-filter: invert(1);
 }
 
-.image-layer-thumbnail-wrap {
-  position: relative;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  flex-shrink: 0;
-}
-
-.image-layer-thumbnail {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  user-select: none;
-  -webkit-user-drag: none;
-  background:
-    linear-gradient(45deg, rgba(255, 255, 255, 0.04) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.04) 75%),
-    linear-gradient(45deg, rgba(255, 255, 255, 0.04) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.04) 75%);
-  background-position: 0 0, 6px 6px;
-  background-size: 12px 12px;
-}
-
-.image-layer-thumbnail-badge {
-  position: absolute;
-  right: 2px;
-  bottom: 2px;
-  width: 14px;
-  height: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  background: rgba(19, 18, 19, 0.9);
-  color: #f3f4f6;
-}
-
-.image-layer-list-item {
-  align-items: flex-start;
-}
-
-.image-layer-list-item :deep(.v-list-item__prepend) {
-  align-self: flex-start;
-  margin-top: 2px;
-}
-
-.image-layer-list-item :deep(.v-list-item__content) {
-  min-width: 0;
-}
-
-.image-layer-item-main {
-  min-width: 0;
-  width: 100%;
-}
-
-.image-layer-item-name {
-  font-size: 0.98rem;
-  line-height: 1.25;
-  color: #f3f4f6;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.image-layer-item-meta {
-  margin-top: 2px;
-  font-size: 0.76rem;
-  line-height: 1.35;
-  color: rgba(243, 244, 246, 0.72);
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.image-layer-item-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 2px;
-  margin-top: 6px;
-  margin-right: -6px;
-}
-
-.utility-panel-main {
-  display: block;
-  min-height: 0;
-}
-
-.utility-panel-section-header {
-  flex-shrink: 0;
-}
-
-.utility-panel-scroll {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding-right: 4px;
-  margin-right: -4px;
-  overscroll-behavior: contain;
-}
-
-.image-layer-scroll-region {
-  min-height: 0;
-  max-height: 220px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding-right: 4px;
-  margin-right: -4px;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-}
-
-.image-layer-scroll-region::after {
-  content: '';
-  display: block;
-  height: 4px;
-}
-
-.image-layer-detail-panel {
-  margin-top: 12px;
-}
-
-.image-layer-detail-header {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.image-layer-detail-header-copy {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.selected-image-layer-name {
-  max-width: 100%;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(var(--v-theme-primary), 0.14);
-  color: #f3f4f6;
-  font-size: 0.78rem;
-  line-height: 1.2;
-  text-align: left;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  align-self: flex-start;
-}
-
-.image-minimap {
-  padding: 10px;
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.image-minimap-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.image-minimap-frame {
-  position: relative;
-  overflow: hidden;
-  border-radius: 10px;
-  cursor: crosshair;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  margin: 0 auto;
-}
-
-.image-minimap-preview {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  user-select: none;
-  -webkit-user-drag: none;
-  opacity: 0.92;
-}
-
-.image-minimap-viewport {
-  position: absolute;
-  box-sizing: border-box;
-  border: 2px solid rgba(66, 165, 245, 0.95);
-  background: rgba(66, 165, 245, 0.16);
-  box-shadow: 0 0 0 999px rgba(7, 10, 17, 0.18);
-  border-radius: 6px;
-  pointer-events: none;
-}
-
 .image-effect-layer {
   border-radius: inherit;
   z-index: 1;
@@ -5974,44 +5563,6 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   border-radius: inherit;
   display: block;
   -webkit-user-drag: none;
-}
-
-.chatlog-textarea {
-  height: 100%;
-  user-select: text !important;
-}
-
-:deep(.chatlog-textarea textarea) {
-  user-select: text !important;
-  cursor: text;
-  height: 100% !important;
-  max-height: none !important;
-}
-
-.censored-region-panel {
-  padding: 10px;
-  background: rgba(255, 255, 255, 0.03);
-  border-color: rgba(255, 255, 255, 0.08) !important;
-}
-
-.censored-region-panel .text-subtitle-2,
-.censored-region-panel .text-body-2 {
-  color: #f3f4f6 !important;
-}
-
-.censored-region-panel .text-caption,
-.censored-region-panel .text-medium-emphasis,
-.censored-region-panel :deep(.text-medium-emphasis) {
-  color: rgba(243, 244, 246, 0.78) !important;
-}
-
-.censored-region-list {
-  max-height: 180px;
-  overflow-y: auto;
-}
-
-.censored-region-item {
-  margin-bottom: 4px;
 }
 
 .hidden-input {
@@ -6102,63 +5653,6 @@ const preventNativePreviewDrag = (event: DragEvent) => {
 .toolbar-popover-fields {
   display: grid;
   gap: 10px;
-}
-
-.shortcuts-card {
-  overflow: hidden;
-}
-
-.shortcuts-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
-}
-
-.shortcuts-group {
-  padding: 18px;
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.shortcut-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.shortcut-row:first-of-type {
-  border-top: 0;
-  padding-top: 0;
-}
-
-.shortcut-keys {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.shortcut-key {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-  min-height: 28px;
-  padding: 4px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(var(--v-theme-primary), 0.28);
-  background: rgba(var(--v-theme-primary), 0.1);
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.shortcut-plus {
-  font-size: 0.75rem;
-  color: rgba(255, 255, 255, 0.55);
 }
 
 .toolbar-button-group .v-btn {
@@ -6252,36 +5746,6 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   flex-shrink: 0;
 }
 
-.utility-panel-sheet,
-.chatlog-panel-sheet {
-  background: #131213 !important;
-  color: #f3f4f6 !important;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.utility-panel-sheet {
-  min-width: 0;
-}
-
-.utility-panel-sheet :deep(.text-medium-emphasis),
-.utility-panel-sheet .text-medium-emphasis,
-.utility-panel-sheet .text-caption,
-.utility-panel-sheet .text-body-2,
-.chatlog-panel-sheet :deep(.text-medium-emphasis),
-.chatlog-panel-sheet .text-medium-emphasis,
-.chatlog-panel-sheet .text-caption,
-.chatlog-panel-sheet .text-body-2 {
-  color: rgba(243, 244, 246, 0.78) !important;
-}
-
-.utility-panel-sheet .text-subtitle-2,
-.utility-panel-sheet .text-subtitle-1,
-.chatlog-panel-sheet .text-subtitle-2,
-.chatlog-panel-sheet .text-subtitle-1 {
-  color: #f3f4f6 !important;
-}
-
 .swatch-grid {
   display: flex;
   flex-wrap: wrap;
@@ -6308,58 +5772,59 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   background: rgb(var(--v-theme-surface));
 }
 
-.tutorial-card {
-  overflow: hidden;
+.tutorial-active .layout-container,
+.tutorial-active .editor-toolbar {
+  transition: filter 0.2s ease, opacity 0.2s ease;
 }
 
-.tutorial-window {
-  min-height: 240px;
+.tutorial-active .layout-container > :not(.tutorial-spotlight-target),
+.tutorial-active .editor-toolbar:not(.tutorial-spotlight-target) {
+  filter: saturate(0.6) brightness(0.62);
+  opacity: 0.72;
 }
 
-.tutorial-step {
-  min-height: 220px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  text-align: center;
-  padding: 12px 20px;
+.tutorial-spotlight-target {
+  position: relative;
+  z-index: 12;
+  outline: 3px solid rgba(125, 211, 252, 0.96);
+  outline-offset: -3px;
+  box-shadow: 0 0 0 9999px rgba(2, 6, 23, 0.28), 0 0 32px rgba(125, 211, 252, 0.5);
 }
 
-.tutorial-icon-wrap {
-  width: 72px;
-  height: 72px;
-  border-radius: 999px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 20px;
-  background: linear-gradient(135deg, rgba(66, 165, 245, 0.18), rgba(171, 71, 188, 0.18));
-  color: rgb(var(--v-theme-primary));
+.editor-toolbar.tutorial-spotlight-target {
+  z-index: 13;
 }
 
-.tutorial-progress {
-  display: flex;
-  justify-content: center;
-  gap: 10px;
+.tutorial-target-effects .editor-toolbar {
+  animation: tutorialPulse 1.4s ease-in-out infinite;
 }
 
-.tutorial-progress-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
-  transition: transform 0.2s ease, background-color 0.2s ease;
+.tutorial-control-highlight {
+  outline: 2px solid #7dd3fc;
+  outline-offset: 3px;
+  animation: tutorialControlPulse 1.2s ease-in-out infinite;
 }
 
-.tutorial-progress-dot.is-active {
-  background: rgb(var(--v-theme-primary));
-  transform: scale(1.2);
+@keyframes tutorialPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(125, 211, 252, 0.35);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px rgba(125, 211, 252, 0.12);
+  }
 }
 
-.tutorial-actions {
-  gap: 8px;
-  flex-wrap: wrap;
+@keyframes tutorialControlPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(125, 211, 252, 0.42);
+  }
+
+  50% {
+    box-shadow: 0 0 0 8px rgba(125, 211, 252, 0.14);
+  }
 }
 
 .settings-section + .settings-section {
@@ -6478,22 +5943,6 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   background: transparent;
   padding: 0;
   cursor: pointer;
-}
-
-.project-status {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.project-status-message {
-  display: block;
-  min-height: 1.35em;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .aspect-ratio-container {

@@ -2,29 +2,58 @@ import type { ShortcutGroup, TutorialStep } from './types';
 
 export const tutorialSteps: TutorialStep[] = [
   {
-    title: 'Start With A Screenshot',
+    title: 'Build A Demo Scene',
     icon: 'mdi-image-plus-outline',
-    description: 'Drop or click to load your screenshot into the canvas. Then add as many extra image layers as you want for props, logos, cutouts, or decals.'
+    description: 'Start with a safe demo project so you can touch the editor without risking real work.',
+    actionLabel: 'Load Demo Project',
+    completionHint: 'A base screenshot, chat draft, and image layer will appear in the editor.',
+    target: 'canvas',
+    task: 'Load the demo project, then look at the canvas and layer panels.'
   },
   {
-    title: 'Add Chat Layers',
+    title: 'Parse A Chat Layer',
     icon: 'mdi-message-plus-outline',
-    description: 'Paste or import a chatlog, then hit Parse to turn it into a movable chat layer. You can create and stack multiple chat layers.'
+    description: 'Chat starts as raw text. Parsing turns it into a styled, movable layer on the screenshot.',
+    actionLabel: 'Parse Demo Chat',
+    completionHint: 'The demo chat becomes a layer and automatic GTA World colors are applied.',
+    target: 'chat-panel',
+    task: 'Use Parse or Ctrl+Enter to create the chat layer.'
   },
   {
-    title: 'Position And Style',
+    title: 'Move And Scale',
     icon: 'mdi-cursor-move',
-    description: 'Use the drag controls to move or zoom the screenshot and chats. Select text in the chat editor to apply censoring or color overrides.'
+    description: 'Turn on chat movement with the highlighted toolbar button, or double-click the chat directly on the canvas. Then drag it, scroll to scale it, or nudge it with the arrow keys.',
+    actionLabel: 'Enable Chat Move',
+    completionHint: 'The chat move button uses the message-lock icon. Double-clicking the chat is the fastest way to enable it from the canvas.',
+    target: 'canvas',
+    task: 'Enable chat movement, then move the chat layer slightly so it sits where you want it.'
   },
   {
-    title: 'Polish With Effects',
+    title: 'Censor Sensitive Text',
+    icon: 'mdi-eye-off-outline',
+    description: 'Select text in the chat editor, then use the censor controls to hide it with a bar, blur, or invisible text.',
+    actionLabel: 'Censor Demo Phrase',
+    completionHint: 'A black bar is applied to one demo phrase, and it appears in the censor review list.',
+    target: 'chat-panel',
+    task: 'Apply censoring to the highlighted demo phrase.'
+  },
+  {
+    title: 'Add Polish',
     icon: 'mdi-image-filter-center-focus',
-    description: 'Open Effects to add film grain, vignette, scanlines, and other finishing layers on top of the image for extra mood.'
+    description: 'Effects and image layers help make the screenshot feel finished instead of flat.',
+    actionLabel: 'Add Demo Polish',
+    completionHint: 'A vignette effect and demo overlay are enabled so you can inspect layer controls.',
+    target: 'utility-panel',
+    task: 'Review the image layer list and the effect indicator.'
   },
   {
-    title: 'Save Your Work',
+    title: 'Finish The Demo',
     icon: 'mdi-content-save-outline',
-    description: 'Use Save Project to keep your session locally, or Save Image to export the final screenshot when everything looks right.'
+    description: 'You now have a complete demo composition in the editor. Save it as a project or export a PNG when you are ready.',
+    actionLabel: 'Mark Demo Ready',
+    completionHint: 'The demo remains in the editor as an unsaved project you can keep experimenting with.',
+    target: 'project',
+    task: 'Finish the walkthrough, then keep editing or save/export the demo.'
   }
 ];
 

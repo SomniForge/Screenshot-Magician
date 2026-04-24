@@ -160,6 +160,10 @@ export interface TutorialStep {
   title: string;
   icon: string;
   description: string;
+  actionLabel?: string;
+  completionHint: string;
+  target: 'toolbar' | 'canvas' | 'utility-panel' | 'chat-panel' | 'effects' | 'project';
+  task: string;
 }
 
 export interface ShortcutGroup {

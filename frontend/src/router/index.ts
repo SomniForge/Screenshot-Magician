@@ -4,6 +4,7 @@ import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation'
 
 const HomeView = () => import('../views/HomeView.vue')
 const ScreenshotMagician = () => import('../views/ScreenshotMagician.vue')
+const TestimonialModerationView = () => import('../views/TestimonialModerationView.vue')
 const TermsOfUse = () => import('../views/TermsOfUse.vue')
 const PrivacyPolicy = () => import('../views/PrivacyPolicy.vue')
 
@@ -20,6 +21,11 @@ const router = createRouter({
       path: '/ssmag',
       name: 'screenshotmagician',
       component: ScreenshotMagician // Point '/ssmag' to the Screenshot Magician view
+    },
+    {
+      path: '/admin/testimonials',
+      name: 'testimonialmoderation',
+      component: TestimonialModerationView
     },
     {
       path: '/terms',

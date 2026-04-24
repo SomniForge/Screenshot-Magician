@@ -1,6 +1,8 @@
 import { computed, onMounted, ref } from 'vue';
+import { apiBaseUrl } from '@/composables/apiBaseUrl';
 
 export interface PublicTestimonial {
+  approvedAt?: string;
   createdAt: string;
   id: string;
   name: string;
@@ -14,27 +16,17 @@ interface SubmitTestimonialPayload {
   rating: number;
 }
 
+interface SubmitTestimonialResponse {
+  message: string;
+  testimonial: PublicTestimonial;
+}
+
 const VISITOR_ID_STORAGE_KEY = 'magicianVisitorId';
 
 const testimonials = ref<PublicTestimonial[]>([]);
 const isLoadingTestimonials = ref(false);
 const isSubmittingTestimonial = ref(false);
 const hasTestimonialsError = ref(false);
-
-const getApiBaseUrl = () => {
-  const configuredBaseUrl = import.meta.env.VITE_STATS_API_BASE_URL?.trim();
-  if (configuredBaseUrl) {
-    return configuredBaseUrl.replace(/\/+$/, '');
-  }
-
-  if (typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)) {
-    return 'http://localhost:3000/api';
-  }
-
-  return '/api';
-};
-
-const apiBaseUrl = getApiBaseUrl();
 
 const createId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -106,10 +98,9 @@ const submitTestimonial = async (payload: SubmitTestimonialPayload) => {
       throw new Error(await readErrorMessage(response));
     }
 
-    const createdTestimonial = await response.json() as PublicTestimonial;
-    testimonials.value = [createdTestimonial, ...testimonials.value.filter((item) => item.id !== createdTestimonial.id)];
+    const submission = await response.json() as SubmitTestimonialResponse;
     hasTestimonialsError.value = false;
-    return createdTestimonial;
+    return submission;
   } finally {
     isSubmittingTestimonial.value = false;
   }
