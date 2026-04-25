@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import type { ChatOverlay, CensoredRegionSummary } from '@/features/magician/types';
+import { computed } from 'vue';
+import { CensorType, type ChatOverlay, type CensoredRegionSummary } from '@/features/magician/types';
 
-defineProps<{
+const props = defineProps<{
   activeChatOverlay: ChatOverlay | null;
   activeChatOverlayId: string | null;
   activeCensoredRegionSummaries: CensoredRegionSummary[];
@@ -11,6 +12,81 @@ defineProps<{
   shouldHighlightCensorControls: boolean;
   shouldHighlightParseControls: boolean;
 }>();
+
+interface CensoredLinePreviewSegment {
+  id: string;
+  isCensored: boolean;
+  text: string;
+  type?: CensorType;
+}
+
+interface CensoredLinePreview {
+  focusRegion: CensoredRegionSummary;
+  id: string;
+  label: string;
+  segments: CensoredLinePreviewSegment[];
+}
+
+const getCensorPreviewClass = (type?: CensorType) => ({
+  'chat-censor-preview__segment--blur': type === CensorType.Blur,
+  'chat-censor-preview__segment--blackbar': type === CensorType.BlackBar,
+  'chat-censor-preview__segment--invisible': type === CensorType.Invisible
+});
+
+const censoredLinePreviews = computed<CensoredLinePreview[]>(() => {
+  const regionsByLine = new Map<number, CensoredRegionSummary[]>();
+
+  props.activeCensoredRegionSummaries.forEach((region) => {
+    const regions = regionsByLine.get(region.lineIndex) ?? [];
+    regions.push(region);
+    regionsByLine.set(region.lineIndex, regions);
+  });
+
+  return Array.from(regionsByLine.entries())
+    .sort(([lineA], [lineB]) => lineA - lineB)
+    .map(([lineIndex, regions]) => {
+      const sortedRegions = [...regions].sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+      const lineText = sortedRegions[0]?.lineText ?? '';
+      const segments: CensoredLinePreviewSegment[] = [];
+      let cursor = 0;
+
+      sortedRegions.forEach((region, regionIndex) => {
+        const start = Math.max(cursor, Math.min(lineText.length, region.startOffset));
+        const end = Math.max(start, Math.min(lineText.length, region.endOffset));
+
+        if (start > cursor) {
+          segments.push({
+            id: `${lineIndex}-plain-${regionIndex}`,
+            isCensored: false,
+            text: lineText.slice(cursor, start)
+          });
+        }
+
+        segments.push({
+          id: `${lineIndex}-censored-${regionIndex}`,
+          isCensored: true,
+          text: lineText.slice(start, end) || ' ',
+          type: region.type
+        });
+        cursor = end;
+      });
+
+      if (cursor < lineText.length) {
+        segments.push({
+          id: `${lineIndex}-plain-end`,
+          isCensored: false,
+          text: lineText.slice(cursor)
+        });
+      }
+
+      return {
+        focusRegion: sortedRegions[0],
+        id: `line-${lineIndex}`,
+        label: `Line ${lineIndex + 1}`,
+        segments
+      };
+    });
+});
 
 const emit = defineEmits<{
   (event: 'update:chatlogText', value: string): void;
@@ -103,7 +179,7 @@ const emit = defineEmits<{
         {{ activeChatOverlay ? 'Selected' : 'Unparsed' }}
       </v-chip>
     </div>
-    <div class="flex-grow-1 d-flex flex-column" style="overflow-y: hidden;">
+    <div class="chat-editor-body flex-grow-1 d-flex flex-column">
       <v-textarea
         :model-value="chatlogText"
         :placeholder="activeChatOverlay
@@ -120,6 +196,42 @@ const emit = defineEmits<{
         @select="emit('handle-text-selection')"
         @keyup="emit('handle-text-selection')"
       ></v-textarea>
+      <div
+        v-if="censoredLinePreviews.length > 0"
+        class="chat-censor-preview mt-2"
+        aria-label="Active censor highlights in the selected chat"
+      >
+        <div class="chat-censor-preview__header">
+          <span>Active censor map</span>
+          <v-chip size="x-small" variant="tonal">
+            {{ activeCensoredRegionSummaries.length }}
+          </v-chip>
+        </div>
+        <div class="chat-censor-preview__lines">
+          <button
+            v-for="line in censoredLinePreviews"
+            :key="line.id"
+            class="chat-censor-preview__line"
+            type="button"
+            @click="emit('focus-censored-region', line.focusRegion)"
+          >
+            <span class="chat-censor-preview__line-label">{{ line.label }}</span>
+            <span class="chat-censor-preview__text">
+              <span
+                v-for="segment in line.segments"
+                :key="segment.id"
+                :class="[
+                  'chat-censor-preview__segment',
+                  {
+                    'chat-censor-preview__segment--censored': segment.isCensored
+                  },
+                  getCensorPreviewClass(segment.type)
+                ]"
+              >{{ segment.text }}</span>
+            </span>
+          </button>
+        </div>
+      </div>
     </div>
     <v-sheet
       v-if="activeChatOverlay"
@@ -232,8 +344,16 @@ const emit = defineEmits<{
 }
 
 .chatlog-textarea {
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 160px;
   user-select: text !important;
+}
+
+.chat-editor-body {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
 }
 
 :deep(.chatlog-textarea textarea) {
@@ -241,6 +361,107 @@ const emit = defineEmits<{
   cursor: text;
   height: 100% !important;
   max-height: none !important;
+}
+
+.chat-censor-preview {
+  flex: 0 0 auto;
+  padding: 8px;
+  border: 1px solid rgba(255, 202, 40, 0.22);
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(255, 202, 40, 0.08), rgba(125, 211, 252, 0.04)),
+    rgba(255, 255, 255, 0.025);
+}
+
+.chat-censor-preview__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: rgba(243, 244, 246, 0.84);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chat-censor-preview__lines {
+  display: grid;
+  gap: 6px;
+  max-height: 112px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.chat-censor-preview__line {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.chat-censor-preview__line:hover {
+  border-color: rgba(125, 211, 252, 0.32);
+  background: rgba(125, 211, 252, 0.08);
+}
+
+.chat-censor-preview__line-label {
+  color: rgba(243, 244, 246, 0.58);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.chat-censor-preview__text {
+  min-width: 0;
+  color: rgba(243, 244, 246, 0.82);
+  font-family: Consolas, 'Liberation Mono', monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.chat-censor-preview__segment--censored {
+  position: relative;
+  display: inline;
+  border-radius: 4px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding: 1px 3px;
+  outline: 1px solid rgba(255, 202, 40, 0.38);
+  background: rgba(255, 202, 40, 0.18);
+}
+
+.chat-censor-preview__segment--blackbar {
+  color: transparent;
+  background: #050506;
+  outline-color: rgba(255, 255, 255, 0.28);
+}
+
+.chat-censor-preview__segment--blur {
+  color: rgba(243, 244, 246, 0.7);
+  filter: blur(1.8px);
+  text-shadow: 0 0 6px rgba(243, 244, 246, 0.9);
+}
+
+.chat-censor-preview__segment--invisible {
+  color: transparent;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 202, 40, 0.2) 0,
+      rgba(255, 202, 40, 0.2) 4px,
+      rgba(255, 202, 40, 0.05) 4px,
+      rgba(255, 202, 40, 0.05) 8px
+    );
 }
 
 .censored-region-panel {

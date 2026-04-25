@@ -13,6 +13,7 @@ import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useAnalytics } from '@/composables/useAnalytics';
 import { copyTextToClipboard, uploadImageToImgBb } from '@/composables/useImageHosting';
 import { recordImageExport } from '@/composables/useLiveStats';
+import { useReviewPrompt } from '@/composables/useReviewPrompt';
 import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation';
 import {
   CensorType,
@@ -132,6 +133,16 @@ const imageHostImgBbApiKey = ref('');
 const isImageHostUploadInProgress = ref(false);
 const lastUploadedImageUrl = ref('');
 const showShareDialog = ref(false);
+const {
+  disableReviewPrompt,
+  initializeReviewPromptTracking,
+  recordReviewPromptExport,
+  recordReviewPromptProjectSave,
+  reviewPromptMetrics,
+  shouldShowReviewPrompt,
+  snoozeReviewPrompt
+} = useReviewPrompt();
+const disableReviewPromptOnClose = ref(false);
 const sharePromptContext = ref<'export' | 'upload'>('export');
 const shareSnippetStyle = ref<'short' | 'casual' | 'forum'>('casual');
 const sharePromptEnabled = ref(true);
@@ -2785,6 +2796,25 @@ const openSharePrompt = (context: 'export' | 'upload') => {
   showShareDialog.value = true;
 };
 
+const openReviewPage = () => {
+  snoozeReviewPrompt();
+
+  const reviewWindow = window.open('/#leave-review', '_blank', 'noopener,noreferrer');
+  if (!reviewWindow) {
+    showEditorNotice('Your browser blocked the review tab. Open the home page when you are ready to leave a review.', 'info');
+  }
+};
+
+const closeReviewPrompt = () => {
+  if (disableReviewPromptOnClose.value) {
+    disableReviewPrompt();
+  } else {
+    snoozeReviewPrompt();
+  }
+
+  disableReviewPromptOnClose.value = false;
+};
+
 const copyAppShareLink = async () => {
   try {
     await copyTextToClipboard(appShareUrl.value);
@@ -2849,6 +2879,7 @@ const saveImage = async () => {
       ...getAnalyticsContext()
     });
     void recordImageExport('download');
+    recordReviewPromptExport();
     showEditorNotice('Exported the screenshot successfully.', 'success');
     openSharePrompt('export');
 
@@ -2896,6 +2927,7 @@ const uploadImageToImgBbHost = async () => {
       ...getAnalyticsContext()
     });
     void recordImageExport('imgbb');
+    recordReviewPromptExport();
     showEditorNotice('Uploaded to ImgBB and copied the direct image link.', 'success');
     openSharePrompt('upload');
   } catch (error) {
@@ -3510,6 +3542,7 @@ onMounted(async () => {
   loadSmartGuidePreferences();
   loadImageHostingPreferences();
   loadSharePromptPreference();
+  initializeReviewPromptTracking();
   loadEditorThemes();
   loadCharacterName();
   loadCustomColorSwatches();
@@ -3711,6 +3744,7 @@ const {
   openNewSessionDialog: () => {
     showNewSessionDialog.value = true;
   },
+  onManualProjectSave: recordReviewPromptProjectSave,
   pendingEditorAction,
   pendingProjectDelete,
   pendingProjectName,
@@ -5170,6 +5204,61 @@ const preventNativePreviewDrag = (event: DragEvent) => {
       </v-card>
     </v-dialog>
 
+    <v-dialog
+      :model-value="shouldShowReviewPrompt"
+      max-width="520"
+      @update:model-value="(value) => { if (!value) closeReviewPrompt(); }"
+    >
+      <v-card class="review-request-card">
+        <v-card-item>
+          <template #prepend>
+            <v-avatar color="amber" variant="tonal" size="48">
+              <v-icon icon="mdi-star-shooting-outline"></v-icon>
+            </v-avatar>
+          </template>
+          <v-card-title class="text-h6">Screenshot Magician seems useful for you</v-card-title>
+          <v-card-subtitle class="review-request-subtitle">
+            If it has saved you time, a quick review helps other players know it is worth trying.
+          </v-card-subtitle>
+        </v-card-item>
+        <v-card-text>
+          <div class="review-request-stats">
+            <div>
+              <strong>{{ reviewPromptMetrics.exportCount }}</strong>
+              <span>exports</span>
+            </div>
+            <div>
+              <strong>{{ reviewPromptMetrics.projectSaveCount }}</strong>
+              <span>project saves</span>
+            </div>
+            <div>
+              <strong>{{ reviewPromptMetrics.sessionCount }}</strong>
+              <span>sessions</span>
+            </div>
+          </div>
+          <p class="text-body-2 text-medium-emphasis mb-0">
+            No pressure. If now is not the moment, we will wait a good while before asking again.
+          </p>
+          <v-checkbox
+            v-model="disableReviewPromptOnClose"
+            color="primary"
+            hide-details
+            class="mt-4"
+            label="Don't ask me for a review again"
+          ></v-checkbox>
+        </v-card-text>
+        <v-card-actions class="flex-wrap ga-2">
+          <v-btn variant="text" @click="closeReviewPrompt">
+            Maybe Later
+          </v-btn>
+          <v-spacer></v-spacer>
+          <v-btn color="primary" prepend-icon="mdi-open-in-new" @click="openReviewPage">
+            Open Review Page
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-snackbar
       v-model="editorNoticeVisible"
       location="bottom right"
@@ -5575,6 +5664,53 @@ const preventNativePreviewDrag = (event: DragEvent) => {
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
   border: 0;
+}
+
+.review-request-card {
+  background:
+    radial-gradient(circle at top left, rgba(255, 202, 40, 0.14), transparent 42%),
+    linear-gradient(150deg, rgba(66, 165, 245, 0.14), rgba(171, 71, 188, 0.08)),
+    #1d2025;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f5f7fa !important;
+}
+
+.review-request-card :deep(.v-card-item__content) {
+  min-width: 0;
+}
+
+.review-request-subtitle {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: initial;
+  line-height: 1.45;
+}
+
+.review-request-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.review-request-stats div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.review-request-stats strong {
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.review-request-stats span {
+  color: rgba(245, 247, 250, 0.68);
+  font-size: 0.78rem;
 }
 
 /* Censoring styles */

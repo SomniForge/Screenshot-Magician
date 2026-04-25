@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import AdSlot from '@/components/AdSlot.vue';
 import { useAdPreferences } from '@/composables/useAdPreferences';
 import { useLiveStatsSummary } from '@/composables/useLiveStats';
@@ -59,6 +60,7 @@ const reviewForm = reactive({
 
 const reviewAlertTone = ref<'success' | 'error' | 'info'>('success');
 const reviewAlertText = ref('');
+const route = useRoute();
 
 const { showAds } = useAdPreferences();
 const { summary, hasSummaryError, lastSummaryRefreshAt } = useLiveStatsSummary();
@@ -195,6 +197,29 @@ const submitReview = async () => {
       : 'We could not save your review right now.';
   }
 };
+
+const scrollToHashTarget = async (hash = route.hash) => {
+  if (!hash) return;
+
+  await nextTick();
+  window.requestAnimationFrame(() => {
+    const target = document.querySelector(hash);
+    if (!(target instanceof HTMLElement)) return;
+
+    target.scrollIntoView({
+      behavior: 'smooth',
+      block: hash === '#leave-review' ? 'center' : 'start'
+    });
+  });
+};
+
+onMounted(() => {
+  void scrollToHashTarget();
+});
+
+watch(() => route.hash, (hash) => {
+  void scrollToHashTarget(hash);
+});
 </script>
 
 <template>
@@ -237,7 +262,7 @@ const submitReview = async () => {
               </a>
             </div>
             <div class="hero-scroll-cue mt-8">
-              <a href="#social-proof" class="hero-scroll-link">
+              <a href="#reviews" class="hero-scroll-link">
                 <span>See reviews and stats</span>
                 <v-icon icon="mdi-chevron-down"></v-icon>
               </a>
@@ -429,7 +454,7 @@ const submitReview = async () => {
             />
           </v-col>
 
-          <v-col cols="12" md="5">
+          <v-col id="leave-review" cols="12" md="5">
             <v-card class="review-form-card" rounded="xl">
               <v-card-item>
                 <v-card-title class="text-h5">Leave a Quick Review</v-card-title>
@@ -638,6 +663,8 @@ const submitReview = async () => {
   min-height: 100%;
   height: 100%;
   overflow-y: auto;
+  scroll-behavior: smooth;
+  scroll-padding-top: 24px;
   position: relative;
   color: var(--home-text);
 }
@@ -663,6 +690,8 @@ const submitReview = async () => {
 .hero-copy-column {
   max-width: 920px;
   margin: 0 auto;
+  position: relative;
+  z-index: 1;
 }
 
 .hero-section::before {
@@ -696,12 +725,15 @@ const submitReview = async () => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  padding: 10px 14px;
+  border-radius: 999px;
   color: var(--home-muted);
   text-decoration: none;
   transition: color 0.2s ease;
 }
 
 .hero-scroll-link:hover {
+  background: rgba(255, 255, 255, 0.05);
   color: var(--home-text);
 }
 
@@ -776,6 +808,11 @@ const submitReview = async () => {
   background:
     radial-gradient(circle at top left, rgba(66, 165, 245, 0.1), rgba(18, 19, 19, 0) 42%),
     radial-gradient(circle at bottom right, rgba(171, 71, 188, 0.12), rgba(18, 19, 19, 0) 38%);
+  scroll-margin-top: 24px;
+}
+
+.stats-section {
+  scroll-margin-top: 24px;
 }
 
 .support-section {

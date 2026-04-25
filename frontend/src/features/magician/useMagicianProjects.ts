@@ -15,6 +15,7 @@ interface UseMagicianProjectsOptions {
   isProjectsLoading: Ref<boolean>;
   markCurrentStateAsSaved: (snapshot?: ProjectRecord['snapshot']) => void;
   openNewSessionDialog: () => void;
+  onManualProjectSave?: () => void;
   pendingEditorAction: Ref<PendingEditorAction | null>;
   pendingProjectDelete: Ref<{ id: string; name: string } | null>;
   pendingProjectName: Ref<string>;
@@ -43,6 +44,7 @@ export const useMagicianProjects = (options: UseMagicianProjectsOptions) => {
     isProjectsLoading,
     markCurrentStateAsSaved,
     openNewSessionDialog,
+    onManualProjectSave,
     pendingEditorAction,
     pendingProjectDelete,
     pendingProjectName,
@@ -169,6 +171,7 @@ export const useMagicianProjects = (options: UseMagicianProjectsOptions) => {
           ...getAnalyticsContext()
         });
         showSaveProjectDialog.value = false;
+        onManualProjectSave?.();
         if (shouldRefreshProjectList) {
           await refreshProjectList();
         }

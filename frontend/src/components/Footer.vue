@@ -7,11 +7,41 @@ defineOptions({
 });
 
 const showChangelogDialog = ref(false);
-const version = 'v2.0.32-beta';
+const version = 'v2.0.33-beta';
 const LAST_SEEN_CHANGELOG_VERSION_KEY = 'magicianLastSeenChangelogVersion';
 const lastSeenVersion = ref('');
 
 const changelog = [
+    {
+        version: 'v2.0.33-beta',
+        date: 'APR-25-2026',
+        changes: [
+            {
+                type: 'new',
+                items: [
+                    'Added a token-gated admin statistics dashboard with timeframe filters, KPI cards, timeline bars, export method breakdowns, top paths, active sessions, testimonials, and recent event history',
+                    'Added event-level backend stats tracking so visits, activity, exports, and export methods can be aggregated over time',
+                    'Added an in-editor active censor map that highlights exactly which chat spans are censored without needing to select them from the review list'
+                ]
+            },
+            {
+                type: 'improved',
+                items: [
+                    'Improved export analytics by tracking whether users save PNGs locally or upload through ImgBB',
+                    'Added a tactful review prompt for frequent users based on local usage signals, with cooldowns, snoozing, and a permanent opt-out',
+                    'Improved review navigation so editor review prompts open the home review form in a new tab without risking unsaved work'
+                ]
+            },
+            {
+                type: 'fixed',
+                items: [
+                    'Fixed stats dashboard scrolling inside the fixed app shell',
+                    'Fixed home page review anchor jumps so review and stats links land at the intended sections',
+                    'Fixed review prompt subtitle truncation so the full message remains readable'
+                ]
+            }
+        ]
+    },
     {
         version: 'v2.0.32-beta',
         date: 'APR-23-2026',
