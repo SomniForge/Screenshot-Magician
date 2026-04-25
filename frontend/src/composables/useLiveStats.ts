@@ -163,11 +163,12 @@ const handleWindowFocus = () => {
   void sendHeartbeat();
 };
 
-export const recordImageExport = async () => {
+export const recordImageExport = async (method: 'download' | 'imgbb' = 'download') => {
   if (typeof window === 'undefined') return;
 
   try {
     await postJson<LiveStatsSummary>('/stats/export', {
+      method,
       visitorId: getVisitorId()
     });
   } catch (error) {

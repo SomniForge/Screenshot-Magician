@@ -2848,7 +2848,7 @@ const saveImage = async () => {
       export_format: 'png',
       ...getAnalyticsContext()
     });
-    void recordImageExport();
+    void recordImageExport('download');
     showEditorNotice('Exported the screenshot successfully.', 'success');
     openSharePrompt('export');
 
@@ -2895,6 +2895,7 @@ const uploadImageToImgBbHost = async () => {
       host_has_direct_url: Boolean(uploadResult.directUrl),
       ...getAnalyticsContext()
     });
+    void recordImageExport('imgbb');
     showEditorNotice('Uploaded to ImgBB and copied the direct image link.', 'success');
     openSharePrompt('upload');
   } catch (error) {

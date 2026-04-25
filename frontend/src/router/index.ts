@@ -5,6 +5,7 @@ import { useUnsavedNavigationStore } from '@/stores/unsavedNavigation'
 const HomeView = () => import('../views/HomeView.vue')
 const ScreenshotMagician = () => import('../views/ScreenshotMagician.vue')
 const TestimonialModerationView = () => import('../views/TestimonialModerationView.vue')
+const AdminStatsView = () => import('../views/AdminStatsView.vue')
 const TermsOfUse = () => import('../views/TermsOfUse.vue')
 const PrivacyPolicy = () => import('../views/PrivacyPolicy.vue')
 
@@ -26,6 +27,11 @@ const router = createRouter({
       path: '/admin/testimonials',
       name: 'testimonialmoderation',
       component: TestimonialModerationView
+    },
+    {
+      path: '/admin/stats',
+      name: 'adminstats',
+      component: AdminStatsView
     },
     {
       path: '/terms',

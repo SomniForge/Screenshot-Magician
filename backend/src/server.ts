@@ -48,24 +48,26 @@ const getAdminTokenFromRequest = (req: Request) => {
   return bearerMatch?.[1]?.trim() || '';
 };
 
-const requireModerationToken = (req: Request, res: Response) => {
+const requireAdminToken = (req: Request, res: Response) => {
   if (!moderationToken) {
-    logWarn('moderation endpoint requested without configured token');
-    res.status(503).json({ error: 'Testimonial moderation is not configured on this server.' });
+    logWarn('admin endpoint requested without configured token');
+    res.status(503).json({ error: 'Admin access is not configured on this server.' });
     return false;
   }
 
   const requestToken = getAdminTokenFromRequest(req);
   if (!requestToken || requestToken !== moderationToken) {
-    logWarn('moderation endpoint rejected for invalid token', {
+    logWarn('admin endpoint rejected for invalid token', {
       path: req.originalUrl
     });
-    res.status(401).json({ error: 'Invalid moderation token.' });
+    res.status(401).json({ error: 'Invalid admin token.' });
     return false;
   }
 
   return true;
 };
+
+const requireModerationToken = requireAdminToken;
 
 app.use(express.json());
 app.use((req, res, next) => {
@@ -141,7 +143,7 @@ app.post('/api/stats/activity', (req: Request, res: Response) => {
 });
 
 app.post('/api/stats/export', (req: Request, res: Response) => {
-  const { visitorId } = req.body ?? {};
+  const { visitorId, method } = req.body ?? {};
 
   if (typeof visitorId !== 'string') {
     logWarn('export stat rejected', { body: req.body ?? null });
@@ -149,8 +151,29 @@ app.post('/api/stats/export', (req: Request, res: Response) => {
     return;
   }
 
-  logInfo('image export recorded', { visitorId });
-  res.json(statsStore.recordExport(visitorId));
+  const exportMethod = method === 'download' || method === 'imgbb' ? method : 'unknown';
+
+  logInfo('image export recorded', { method: exportMethod, visitorId });
+  res.json(statsStore.recordExport(visitorId, exportMethod));
+});
+
+app.get('/api/admin/stats', (req: Request, res: Response) => {
+  if (!requireAdminToken(req, res)) {
+    return;
+  }
+
+  const range = typeof req.query.range === 'string' ? req.query.range : undefined;
+  const bucket = typeof req.query.bucket === 'string' ? req.query.bucket : undefined;
+  const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+  const to = typeof req.query.to === 'string' ? req.query.to : undefined;
+
+  logInfo('admin stats requested', { bucket, from, range, to });
+  res.json(statsStore.getAdminStats({
+    bucket: bucket === 'hour' || bucket === 'day' || bucket === 'week' || bucket === 'month' ? bucket : undefined,
+    from,
+    range: range === '24h' || range === '7d' || range === '30d' || range === '90d' || range === 'all' ? range : undefined,
+    to
+  }));
 });
 
 app.get('/api/testimonials', (_req: Request, res: Response) => {
