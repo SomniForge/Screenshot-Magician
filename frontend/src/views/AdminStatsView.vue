@@ -405,6 +405,7 @@ const getEventLabel = (event: AdminStatsEvent) => {
 
 <style scoped>
 .stats-view {
+  height: 100%;
   min-height: 100%;
   background:
     radial-gradient(circle at 8% 12%, rgba(100, 210, 255, 0.18), transparent 30%),
@@ -412,6 +413,7 @@ const getEventLabel = (event: AdminStatsEvent) => {
     linear-gradient(135deg, #0b1016 0%, #121b22 48%, #15120d 100%);
   color: #f7fbff;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .stats-shell {
